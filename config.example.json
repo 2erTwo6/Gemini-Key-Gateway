@@ -1,0 +1,10 @@
+{
+  "listen": ":8080",
+  "upstream": "https://generativelanguage.googleapis.com",
+  "max_retries": 5,
+  "admin_password": "change-me",
+  "keys": [
+    "AIzaSyA...your-first-key...",
+    "AIzaSyB...your-second-key..."
+  ]
+}

@@ -1,0 +1,7 @@
+# 运行时文件（含管理密码，切勿提交）
+config.json
+gateway.log
+gateway.pid
+
+# 构建产物
+gemini-key-gateway

@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gemini Key Gateway</title>
+<style>
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+body { font-family: system-ui, sans-serif; margin: 0; background: #11151c; color: #e6e9ef; }
+main { max-width: 1000px; margin: 0 auto; padding: 24px 16px 60px; }
+h1 { font-size: 20px; margin: 0 0 4px; }
+.sub { color: #8b93a1; font-size: 13px; margin-bottom: 20px; }
+.cards { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
+.card { background: #1a2029; border: 1px solid #2a3340; border-radius: 10px; padding: 12px 18px; min-width: 120px; }
+.card .num { font-size: 26px; font-weight: 600; }
+.card .lbl { font-size: 12px; color: #8b93a1; }
+.card.warn .num { color: #f0b75e; }
+.card.bad .num { color: #e0665f; }
+table { width: 100%; border-collapse: collapse; background: #1a2029; border: 1px solid #2a3340; border-radius: 10px; overflow: hidden; }
+th, td { text-align: left; padding: 10px 12px; font-size: 13px; border-bottom: 1px solid #222b37; }
+th { background: #202834; color: #aab3c0; font-weight: 500; white-space: nowrap; }
+td.mono { font-family: ui-monospace, monospace; font-size: 12px; }
+.badge { display: inline-block; padding: 2px 9px; border-radius: 99px; font-size: 12px; }
+.badge.available { background: #1d3a2c; color: #5fd48c; }
+.badge.invalid { background: #3d2322; color: #f07c75; }
+.badge.disabled { background: #333; color: #9aa4b2; }
+.badge.rpd { background: #3a3020; color: #e8b05c; }
+.badge.rpm { background: #2a3548; color: #7fa8e8; }
+button { background: #2a3340; color: #e6e9ef; border: 1px solid #3a4555; border-radius: 7px; padding: 6px 12px; cursor: pointer; font-size: 13px; }
+button:hover { background: #333e4f; }
+button.danger:hover { background: #4a2726; border-color: #6b3735; }
+button.ok:hover { background: #1f4a33; border-color: #2e6b48; }
+.addrow { display: flex; gap: 8px; margin-bottom: 20px; }
+.addrow input { flex: 1; background: #1a2029; color: #e6e9ef; border: 1px solid #2a3340; border-radius: 7px; padding: 8px 12px; font-size: 13px; }
+.err { color: #f07c75; font-size: 13px; margin-top: 8px; }
+td .locks { font-size: 12px; color: #8b93a1; }
+.toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+.loginwrap { min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+.logincard { background: #1a2029; border: 1px solid #2a3340; border-radius: 12px; padding: 32px 36px; width: 320px; text-align: center; }
+.logincard h2 { margin: 0 0 20px; font-size: 18px; }
+.logincard input { width: 100%; background: #11151c; color: #e6e9ef; border: 1px solid #2a3340; border-radius: 7px; padding: 10px 12px; font-size: 14px; margin-bottom: 14px; }
+.logincard button { width: 100%; padding: 10px; font-size: 14px; }
+.logincard .err { margin-top: 12px; }
+</style>
+</head>
+<body>
+
+<div class="loginwrap" id="login" style="display:none">
+  <div class="logincard">
+    <h2>Gemini Key Gateway</h2>
+    <input type="password" id="pwd" placeholder="管理密码" autocomplete="current-password">
+    <button class="ok" onclick="login()">登 录</button>
+    <div class="err" id="login-err"></div>
+  </div>
+</div>
+
+<main id="panel" style="display:none">
+  <div class="toolbar">
+    <div>
+      <h1>Gemini Key Gateway</h1>
+      <div class="sub" id="sub">加载中…</div>
+    </div>
+    <button onclick="logout()">退出</button>
+  </div>
+
+  <div class="cards">
+    <div class="card"><div class="num" id="c-total">-</div><div class="lbl">总 Key</div></div>
+    <div class="card"><div class="num" id="c-avail">-</div><div class="lbl">可用</div></div>
+    <div class="card warn"><div class="num" id="c-locked">-</div><div class="lbl">模型锁定</div></div>
+    <div class="card bad"><div class="num" id="c-invalid">-</div><div class="lbl">失效</div></div>
+    <div class="card"><div class="num" id="c-disabled">-</div><div class="lbl">禁用</div></div>
+  </div>
+
+  <div class="addrow">
+    <input id="newkey" placeholder="输入新的 API Key 后回车添加…" autocomplete="off" spellcheck="false">
+    <button class="ok" onclick="addKey()">添加</button>
+  </div>
+
+  <table>
+    <thead><tr>
+      <th>ID</th><th>Key</th><th>状态</th><th>请求</th><th>失败</th>
+      <th>锁定 / 错误</th><th>操作</th>
+    </tr></thead>
+    <tbody id="rows"><tr><td colspan="7" style="color:#8b93a1">加载中…</td></tr></tbody>
+  </table>
+  <div class="err" id="err"></div>
+</main>
+
+<script>
+const TOKEN_KEY = 'gw_token';
+const loginEl = document.getElementById('login');
+const panelEl = document.getElementById('panel');
+
+function getToken() { return localStorage.getItem(TOKEN_KEY); }
+
+async function api(path, opts = {}) {
+  opts.headers = Object.assign({ 'Authorization': 'Bearer ' + getToken() }, opts.headers || {});
+  const r = await fetch(path, opts);
+  if (r.status === 401) { logout(); throw new Error('未授权，请重新登录'); }
+  return r;
+}
+
+function showLogin() { loginEl.style.display = 'flex'; panelEl.style.display = 'none'; }
+function showPanel() { loginEl.style.display = 'none'; panelEl.style.display = 'block'; refresh(); }
+
+async function login() {
+  const v = document.getElementById('pwd').value.trim();
+  if (!v) return;
+  document.getElementById('login-err').textContent = '';
+  try {
+    const r = await fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: v }) });
+    if (!r.ok) { document.getElementById('login-err').textContent = '密码错误'; return; }
+    const d = await r.json();
+    localStorage.setItem(TOKEN_KEY, d.token);
+    document.getElementById('pwd').value = '';
+    showPanel();
+  } catch (e) { document.getElementById('login-err').textContent = '登录失败: ' + e; }
+}
+
+function logout() {
+  localStorage.removeItem(TOKEN_KEY);
+  showLogin();
+}
+
+async function refresh() {
+  try {
+    const r = await api('/api/pool');
+    const d = await r.json();
+    document.getElementById('c-total').textContent = d.total;
+    document.getElementById('c-avail').textContent = d.available;
+    document.getElementById('c-locked').textContent = d.locked_models;
+    document.getElementById('c-invalid').textContent = d.invalid;
+    document.getElementById('c-disabled').textContent = d.disabled;
+    document.getElementById('sub').textContent =
+      'RPD 赦免时刻：' + new Date(d.refresh_time).toLocaleString() +
+      ' ｜ 刷新于 ' + new Date().toLocaleTimeString();
+    const rows = document.getElementById('rows');
+    rows.innerHTML = '';
+    if (!d.keys.length) {
+      rows.innerHTML = '<tr><td colspan="7" style="color:#8b93a1">暂无 Key</td></tr>';
+      return;
+    }
+    for (const k of d.keys) {
+      const tr = document.createElement('tr');
+      const lockTxt = Object.entries(k.locks).map(([m, l]) =>
+        `<span class="badge ${l.kind}">${m} ${l.kind} 至 ${new Date(l.until).toLocaleTimeString()}</span>`
+      ).join(' ');
+      const stateBadge = `<span class="badge ${k.state}">${k.state}</span>`;
+      const errTxt = k.last_error ? ` ${k.last_error}` : '';
+      tr.innerHTML = `
+        <td class="mono">${k.id}</td>
+        <td class="mono">${k.key}</td>
+        <td>${stateBadge}</td>
+        <td>${k.requests}</td>
+        <td>${k.failures}</td>
+        <td><span class="locks">${lockTxt || '无'}${errTxt}</span></td>
+        <td>
+          <button class="ok" onclick="setState('${k.id}','enabled')">启用</button>
+          <button onclick="setState('${k.id}','disabled')">禁用</button>
+          <button class="danger" onclick="delKey('${k.id}')">删除</button>
+        </td>`;
+      rows.appendChild(tr);
+    }
+  } catch (e) {
+    if (e.message !== '未授权，请重新登录') {
+      document.getElementById('err').textContent = '加载失败: ' + e;
+    }
+  }
+}
+
+async function addKey() {
+  const input = document.getElementById('newkey');
+  const v = input.value.trim();
+  if (!v) return;
+  try {
+    const r = await api('/api/keys', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key: v }) });
+    if (!r.ok) { document.getElementById('err').textContent = '添加失败'; return; }
+    input.value = '';
+    refresh();
+  } catch (e) { document.getElementById('err').textContent = e.message; }
+}
+
+async function delKey(id) {
+  try {
+    const r = await api('/api/keys/' + id, { method: 'DELETE' });
+    if (!r.ok) { document.getElementById('err').textContent = '删除失败'; return; }
+    refresh();
+  } catch (e) { document.getElementById('err').textContent = e.message; }
+}
+
+async function setState(id, state) {
+  try {
+    const r = await api('/api/keys/' + id + '/state', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ state }) });
+    if (!r.ok) { document.getElementById('err').textContent = '操作失败'; return; }
+    refresh();
+  } catch (e) { document.getElementById('err').textContent = e.message; }
+}
+
+document.getElementById('pwd').addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
+document.getElementById('newkey').addEventListener('keydown', e => { if (e.key === 'Enter') addKey(); });
+
+if (getToken()) showPanel(); else showLogin();
+setInterval(() => { if (getToken()) refresh(); }, 5000);
+</script>
+</body>
+</html>
