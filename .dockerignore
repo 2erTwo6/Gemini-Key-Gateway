@@ -1,0 +1,4 @@
+.git
+config.json
+*_test.go
+README.md

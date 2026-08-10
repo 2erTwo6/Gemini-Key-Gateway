@@ -67,6 +67,20 @@ func generatePassword() (string, error) {
 
 // saveConfigPassword 将生成的密码写回配置文件（保留其余字段）。
 func saveConfigPassword(path, password string) error {
+	return updateConfig(path, func(m map[string]any) {
+		m["admin_password"] = password
+	})
+}
+
+// saveConfigKeys 将 Key 列表写回配置文件（保留其余字段，如 admin_password）。
+func saveConfigKeys(path string, keys []string) error {
+	return updateConfig(path, func(m map[string]any) {
+		m["keys"] = keys
+	})
+}
+
+// updateConfig 读取配置文件、调用 mutate 修改字段后原子写回。
+func updateConfig(path string, mutate func(map[string]any)) error {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -75,7 +89,7 @@ func saveConfigPassword(path, password string) error {
 	if err := json.Unmarshal(raw, &m); err != nil {
 		return err
 	}
-	m["admin_password"] = password
+	mutate(m)
 	out, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		return err

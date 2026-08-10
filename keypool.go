@@ -239,6 +239,17 @@ func (p *Pool) Remove(id string) bool {
 	return false
 }
 
+// Keys 返回池内全部原始 Key（按添加顺序）。
+func (p *Pool) Keys() []string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	keys := make([]string, 0, len(p.keys))
+	for _, k := range p.keys {
+		keys = append(keys, k.key)
+	}
+	return keys
+}
+
 func (p *Pool) byIDLocked(id string) *Key {
 	for _, k := range p.keys {
 		if k.id == id {

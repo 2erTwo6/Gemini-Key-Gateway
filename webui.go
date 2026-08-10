@@ -3,7 +3,9 @@ package main
 import (
 	"embed"
 	"encoding/json"
+	"log/slog"
 	"net/http"
+	"strings"
 )
 
 //go:embed web/index.html
@@ -12,6 +14,7 @@ var webFS embed.FS
 type WebUI struct {
 	pool          *Pool
 	adminPassword string
+	configPath    string // 配置文件路径；WebUI 增删 Key 后写回（持久化）
 }
 
 func (w *WebUI) handleLogin(rw http.ResponseWriter, r *http.Request) {
@@ -56,16 +59,58 @@ func (w *WebUI) handlePool(rw http.ResponseWriter, r *http.Request) {
 	writeJSON(rw, http.StatusOK, w.pool.Snapshot())
 }
 
+// handleAddKey 添加单个（{"key": "..."}）或批量（{"keys": ["...", "..."]}）Key，
+// 支持在 keys 数组中混入空串/重复项（自动去重跳过），添加后写回配置文件。
 func (w *WebUI) handleAddKey(rw http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Key string `json:"key"`
+		Key  string   `json:"key"`
+		Keys []string `json:"keys"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Key == "" {
-		writeJSON(rw, http.StatusBadRequest, map[string]string{"error": "key is required"})
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(rw, http.StatusBadRequest, map[string]string{"error": "invalid body"})
 		return
 	}
-	id := w.pool.Add(req.Key)
-	writeJSON(rw, http.StatusOK, map[string]string{"id": id})
+	keys := req.Keys
+	if len(keys) == 0 {
+		if req.Key == "" {
+			writeJSON(rw, http.StatusBadRequest, map[string]string{"error": "key is required"})
+			return
+		}
+		keys = []string{req.Key}
+	}
+	seen := make(map[string]bool)
+	ids := make([]string, 0, len(keys))
+	added := 0
+	for _, k := range keys {
+		k = strings.TrimSpace(k)
+		if k == "" || seen[k] {
+			continue
+		}
+		seen[k] = true
+		added++
+		ids = append(ids, w.pool.Add(k))
+	}
+	resp := map[string]any{
+		"added":     added,
+		"ids":       ids,
+		"persisted": w.persistKeys(),
+	}
+	if len(keys) == 1 {
+		resp["id"] = ids[0]
+	}
+	writeJSON(rw, http.StatusOK, resp)
+}
+
+// persistKeys 将当前池内全部 Key 写回配置文件；未配置 configPath 时跳过。
+func (w *WebUI) persistKeys() bool {
+	if w.configPath == "" {
+		return false
+	}
+	if err := saveConfigKeys(w.configPath, w.pool.Keys()); err != nil {
+		slog.Error("persist keys to config", "err", err)
+		return false
+	}
+	return true
 }
 
 func (w *WebUI) handleDeleteKey(rw http.ResponseWriter, r *http.Request) {
@@ -74,7 +119,7 @@ func (w *WebUI) handleDeleteKey(rw http.ResponseWriter, r *http.Request) {
 		writeJSON(rw, http.StatusNotFound, map[string]string{"error": "key not found"})
 		return
 	}
-	writeJSON(rw, http.StatusOK, map[string]string{"ok": "true"})
+	writeJSON(rw, http.StatusOK, map[string]any{"ok": "true", "persisted": w.persistKeys()})
 }
 
 func (w *WebUI) handleSetState(rw http.ResponseWriter, r *http.Request) {

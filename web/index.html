@@ -31,8 +31,9 @@ button { background: #2a3340; color: #e6e9ef; border: 1px solid #3a4555; border-
 button:hover { background: #333e4f; }
 button.danger:hover { background: #4a2726; border-color: #6b3735; }
 button.ok:hover { background: #1f4a33; border-color: #2e6b48; }
-.addrow { display: flex; gap: 8px; margin-bottom: 20px; }
-.addrow input { flex: 1; background: #1a2029; color: #e6e9ef; border: 1px solid #2a3340; border-radius: 7px; padding: 8px 12px; font-size: 13px; }
+.addrow { display: flex; gap: 8px; margin-bottom: 20px; align-items: flex-start; }
+.addrow input, .addrow textarea { flex: 1; background: #1a2029; color: #e6e9ef; border: 1px solid #2a3340; border-radius: 7px; padding: 8px 12px; font-size: 13px; }
+.addrow textarea { font-family: ui-monospace, monospace; min-height: 38px; resize: vertical; }
 .err { color: #f07c75; font-size: 13px; margin-top: 8px; }
 td .locks { font-size: 12px; color: #8b93a1; }
 .toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
@@ -73,7 +74,7 @@ td .locks { font-size: 12px; color: #8b93a1; }
   </div>
 
   <div class="addrow">
-    <input id="newkey" placeholder="输入新的 API Key 后回车添加…" autocomplete="off" spellcheck="false">
+    <textarea id="newkey" rows="2" placeholder="输入 API Key，一行一个，支持批量添加…&#10;（Ctrl+Enter 提交）" autocomplete="off" spellcheck="false"></textarea>
     <button class="ok" onclick="addKey()">添加</button>
   </div>
 
@@ -171,12 +172,15 @@ async function refresh() {
 
 async function addKey() {
   const input = document.getElementById('newkey');
-  const v = input.value.trim();
-  if (!v) return;
+  const lines = input.value.split('\n').map(s => s.trim()).filter(Boolean);
+  if (!lines.length) return;
   try {
-    const r = await api('/api/keys', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key: v }) });
+    const r = await api('/api/keys', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ keys: lines }) });
     if (!r.ok) { document.getElementById('err').textContent = '添加失败'; return; }
+    const d = await r.json();
     input.value = '';
+    document.getElementById('err').textContent =
+      '已添加 ' + d.added + ' 个 Key' + (d.persisted ? '，已写入配置文件' : '（未能写入配置文件，重启后丢失）');
     refresh();
   } catch (e) { document.getElementById('err').textContent = e.message; }
 }
@@ -198,7 +202,7 @@ async function setState(id, state) {
 }
 
 document.getElementById('pwd').addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
-document.getElementById('newkey').addEventListener('keydown', e => { if (e.key === 'Enter') addKey(); });
+document.getElementById('newkey').addEventListener('keydown', e => { if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') addKey(); });
 
 if (getToken()) showPanel(); else showLogin();
 setInterval(() => { if (getToken()) refresh(); }, 5000);

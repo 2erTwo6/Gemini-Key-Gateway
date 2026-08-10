@@ -1,0 +1,22 @@
+services:
+  gateway:
+    build: .
+    image: gemini-key-gateway:latest
+    container_name: gemini-key-gateway
+    # 仅绑定回环地址，只允许本机访问；严禁改为 "8080:8080"（0.0.0.0，公网可达）！
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      # Fedora 等启用 SELinux 的系统需加 :Z 后缀，即 ./config.json:/app/config.json:Z
+      - ./config.json:/app/config.json
+    restart: unless-stopped
+    # 推荐用法：与 new-api 同一虚拟网络，通过容器名 http://gemini-key-gateway:8080 访问，此时无需映射端口
+    # networks:
+    #   - new-api_default
+    #   - gateway-local
+
+# networks:
+#   new-api_default:
+#     external: true
+#   gateway-local:
+#     driver: bridge

@@ -37,7 +37,7 @@ func main() {
 
 	pool := NewPool(cfg.Keys)
 	proxy := NewProxy(pool, cfg.Upstream, cfg.MaxRetries)
-	web := &WebUI{pool: pool, adminPassword: cfg.AdminPassword}
+	web := &WebUI{pool: pool, adminPassword: cfg.AdminPassword, configPath: *configPath}
 
 	// protect 为管理 API 套 Bearer Token 认证（密码保证非空，见上方生成逻辑）
 	protect := func(h http.Handler) http.Handler {
