@@ -2,6 +2,7 @@
   "listen": ":8080",
   "upstream": "https://generativelanguage.googleapis.com",
   "max_retries": 5,
+  "request_timeout": 30,
   "admin_password": "change-me",
   "keys": [
     "AIzaSyA...your-first-key...",

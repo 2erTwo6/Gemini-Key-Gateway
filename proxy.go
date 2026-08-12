@@ -31,7 +31,7 @@ type Proxy struct {
 	maxRetries int
 }
 
-func NewProxy(pool *Pool, upstream string, maxRetries int) *Proxy {
+func NewProxy(pool *Pool, upstream string, maxRetries int, requestTimeout time.Duration) *Proxy {
 	u, err := url.Parse(upstream)
 	if err != nil {
 		u, _ = url.Parse(defaultUpstream)
@@ -41,7 +41,7 @@ func NewProxy(pool *Pool, upstream string, maxRetries int) *Proxy {
 		MaxIdleConns:          256,
 		MaxIdleConnsPerHost:   256,
 		IdleConnTimeout:       90 * time.Second,
-		ResponseHeaderTimeout: 120 * time.Second,
+		ResponseHeaderTimeout: requestTimeout,
 	}
 	return &Proxy{
 		pool:       pool,
@@ -72,8 +72,14 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		resp, err := p.forward(r.Context(), r.Method, r.URL, body, r.Header, key.key)
 		if err != nil {
 			p.pool.RecordFailure(key.id, 0)
-			slog.Warn("upstream request failed", "key", key.id, "model", model, "err", err)
-			continue // 网络错误：不标记 Key，换 Key 重试
+			slog.Warn("upstream request failed, returning 503", "key", key.id, "model", model, "err", err)
+			// 网络错误/超时不重试（上游同一端点，换 Key 无意义），重试交给下游；
+			// 客户端已断开则无处可写，直接返回。
+			if r.Context().Err() != nil {
+				return
+			}
+			http.Error(w, "The Gemini API did not provide any response before timing out.", http.StatusServiceUnavailable)
+			return
 		}
 		switch {
 		case resp.StatusCode >= 200 && resp.StatusCode < 300:

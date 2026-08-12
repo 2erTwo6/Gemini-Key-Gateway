@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -15,10 +16,15 @@ import (
 // newTestProxy 搭建完整链路：gateway(proxy) → mock 上游。
 func newTestProxy(t *testing.T, keys []string, upstreamHandler http.HandlerFunc) (*Pool, *httptest.Server) {
 	t.Helper()
+	return newTestProxyT(t, keys, 5*time.Second, upstreamHandler)
+}
+
+func newTestProxyT(t *testing.T, keys []string, requestTimeout time.Duration, upstreamHandler http.HandlerFunc) (*Pool, *httptest.Server) {
+	t.Helper()
 	up := httptest.NewServer(upstreamHandler)
 	t.Cleanup(up.Close)
 	pool := NewPool(keys)
-	proxy := NewProxy(pool, up.URL, 5)
+	proxy := NewProxy(pool, up.URL, 5, requestTimeout)
 	gate := httptest.NewServer(proxy)
 	t.Cleanup(gate.Close)
 	return pool, gate
@@ -274,5 +280,32 @@ func TestNoUsableKeyReturns503(t *testing.T) {
 	resp, _ := post(t, gate.URL+"/v1beta/models/gemini-2.0-flash:generateContent", `{}`)
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Errorf("status = %d, want 503", resp.StatusCode)
+	}
+}
+
+func TestUpstreamTimeoutReturns503NoRetry(t *testing.T) {
+	var hits atomic.Int32
+	pool, gate := newTestProxyT(t, []string{"k1", "k2"}, 100*time.Millisecond, func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		time.Sleep(300 * time.Millisecond) // 挂起：不发任何响应头
+		w.Write([]byte("late"))
+	})
+
+	resp, raw := post(t, gate.URL+"/v1beta/models/gemini-2.0-flash:generateContent", `{}`)
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", resp.StatusCode)
+	}
+	if string(raw) != "The Gemini API did not provide any response before timing out.\n" {
+		t.Errorf("body = %q, want gateway timeout message", raw)
+	}
+	if n := hits.Load(); n != 1 {
+		t.Errorf("upstream hits = %d, want 1 (timeout must NOT retry)", n)
+	}
+	snap := pool.Snapshot()
+	if snap.Keys[0].State != "available" || snap.Keys[1].State != "available" {
+		t.Error("timeout must not mark keys invalid")
+	}
+	if snap.Keys[0].Failures != 1 || snap.Keys[1].Failures != 0 {
+		t.Errorf("unexpected failures: k1=%d k2=%d", snap.Keys[0].Failures, snap.Keys[1].Failures)
 	}
 }

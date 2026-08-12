@@ -9,16 +9,18 @@ import (
 )
 
 const (
-	defaultListen   = ":8080"
-	defaultUpstream = "https://generativelanguage.googleapis.com"
-	defaultMaxRetry = 5
-	defaultRPMLock  = 60 // 非 RPD 的 429 固定冷却秒数
+	defaultListen        = ":8080"
+	defaultUpstream      = "https://generativelanguage.googleapis.com"
+	defaultMaxRetry      = 5
+	defaultRequestTimeout = 30 // 上游响应头等待超时秒数
+	defaultRPMLock       = 60 // 非 RPD 的 429 固定冷却秒数
 )
 
 type Config struct {
 	Listen        string   `json:"listen"`
 	Upstream      string   `json:"upstream"`
 	MaxRetries    int      `json:"max_retries"`
+	RequestTimeout int      `json:"request_timeout"` // 秒；上游未在超时内发出响应头则网关直接回 503
 	Keys          []string `json:"keys"`
 	AdminPassword string   `json:"admin_password"` // WebUI/管理 API 的 Basic Auth 密码，留空则无认证
 }
@@ -32,6 +34,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.MaxRetries <= 0 {
 		c.MaxRetries = defaultMaxRetry
+	}
+	if c.RequestTimeout <= 0 {
+		c.RequestTimeout = defaultRequestTimeout
 	}
 }
 

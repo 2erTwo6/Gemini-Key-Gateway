@@ -15,6 +15,7 @@ Gemini API Key 轮询网关：自动切换无效 Key，忠实透传请求/响应
     - **RPD**（含 `PerDay`）→ 锁定该 **Key×Model** 至当日额度刷新点（美国太平洋时间午夜，即北京时间夏令时 15:00 / 冬令时 16:00，自动适配 DST），到点自动赦免
     - **RPM**（含 `PerMinute`）及其他 429 → 该 **Key×Model** 固定冷却 60s 后自动恢复
   - `5xx` → 不重试，原样透传错误
+  - **网络错误/响应头超时**（`request_timeout` 内上游无响应，如挂起、满载排队）→ 不重试、不标记 Key，网关直接回 `503`（`The Gemini API did not provide any response before timing out.`），由下游自行重试/降级
   - 重试耗尽 → **原样透传最后一次上游响应**（状态码/响应头/响应体）
 - **忠实流式透传**：SSE 响应逐 chunk 写入并 `Flush`，字节级原样透传，零缓冲聚合、零改写；不干预内容编码
 - **并发安全**：每请求独立 goroutine，Key 池互斥锁保护，锁内零网络 I/O，`-race` 全量测试通过
@@ -42,6 +43,7 @@ cp config.example.json config.json
   "listen": ":8080",
   "upstream": "https://generativelanguage.googleapis.com",
   "max_retries": 5,
+  "request_timeout": 30,
   "admin_password": "your-password",
   "keys": [
     "AIzaSyA...your-first-key...",
@@ -55,6 +57,7 @@ cp config.example.json config.json
 | `listen` | 监听地址 | `:8080` |
 | `upstream` | Gemini API 上游地址 | `https://generativelanguage.googleapis.com` |
 | `max_retries` | 一次请求最多重试次数（总尝试 = `max_retries` + 1） | `5` |
+| `request_timeout` | 上游响应头等待超时（秒）。上游未在超时内发出任何响应头（如挂起/满载排队）则网关不重试，直接回 503（`The Gemini API did not provide any response before timing out.`），重试交给下游 | `30` |
 | `admin_password` | WebUI/管理 API 的认证密码；留空则首次启动自动生成 | 自动生成 |
 | `keys` | Gemini API Key 列表（必填） | — |
 
@@ -173,7 +176,7 @@ go vet ./...
 go test -race -count=1 ./...                                  # 全量测试（含并发竞态检测）
 ```
 
-测试覆盖：Key 轮询、4xx 失效切换、RPD 锁定至刷新点赦免（含 DST 边界）、RPM 60s 冷却、5xx 透传、重试耗尽透传最后响应、SSE 逐字节一致与流式到达、客户端 key 剥离、WebUI 认证、高并发无竞态。
+测试覆盖：Key 轮询、4xx 失效切换、RPD 锁定至刷新点赦免（含 DST 边界）、RPM 60s 冷却、5xx 透传、重试耗尽透传最后响应、响应头超时网关自回 503 且不重试、SSE 逐字节一致与流式到达、客户端 key 剥离、WebUI 认证、高并发无竞态。
 
 ## 文件结构
 
