@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"compress/gzip"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -26,6 +27,19 @@ func newTestProxyT(t *testing.T, keys []string, requestTimeout time.Duration, up
 	t.Cleanup(up.Close)
 	pool := NewPool(keys)
 	proxy := NewProxy(pool, up.URL, 5, requestTimeout)
+	gate := httptest.NewServer(proxy)
+	t.Cleanup(gate.Close)
+	return pool, gate
+}
+
+// newBlockRetryProxy 搭建启用安全拦截自动重试的链路：gateway(proxy) → mock 上游。
+func newBlockRetryProxy(t *testing.T, keys []string, maxBlockRetries int, upstreamHandler http.HandlerFunc) (*Pool, *httptest.Server) {
+	t.Helper()
+	up := httptest.NewServer(upstreamHandler)
+	t.Cleanup(up.Close)
+	pool := NewPool(keys)
+	proxy := NewProxy(pool, up.URL, 5, 5*time.Second)
+	proxy.SetBlockRetry(true, maxBlockRetries)
 	gate := httptest.NewServer(proxy)
 	t.Cleanup(gate.Close)
 	return pool, gate
@@ -453,5 +467,219 @@ func TestUpstreamTimeoutReturns503NoRetry(t *testing.T) {
 	}
 	if snap.Keys[0].Failures != 1 || snap.Keys[1].Failures != 0 {
 		t.Errorf("unexpected failures: k1=%d k2=%d", snap.Keys[0].Failures, snap.Keys[1].Failures)
+	}
+}
+
+// --- 安全拦截自动重试 ---
+
+func TestBlockRetryAppendsContinueAndSucceeds(t *testing.T) {
+	var bodies []string
+	var keys []string
+	_, gate := newBlockRetryProxy(t, []string{"k1", "k2"}, 1, func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(raw))
+		keys = append(keys, keyInQuery(r))
+		w.Header().Set("Content-Type", "application/json")
+		if len(bodies) == 1 {
+			w.Write([]byte(`{"promptFeedback":{"blockReason":"SAFETY"}}`))
+			return
+		}
+		w.Write([]byte(`{"candidates":[{"content":{"parts":[{"text":"继续吧"}]}}]}`))
+	})
+
+	resp, raw := post(t, gate.URL+"/v1beta/models/gemini-2.0-flash:generateContent", `{"contents":[{"role":"user","parts":[{"text":"早上好"}]}]}`)
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if string(raw) != `{"candidates":[{"content":{"parts":[{"text":"继续吧"}]}}]}` {
+		t.Errorf("body = %q, want retried success body", raw)
+	}
+	if len(bodies) != 2 {
+		t.Fatalf("upstream hits = %d, want 2 (1 blocked + 1 retry)", len(bodies))
+	}
+	if keys[0] != keys[1] {
+		t.Errorf("block retry should reuse the same key, got %q then %q", keys[0], keys[1])
+	}
+	for _, want := range []string{"System:网络错误", "卡了，继续", `"role":"model"`, `"role":"user"`} {
+		if !strings.Contains(bodies[1], want) {
+			t.Errorf("retried body missing %q: %s", want, bodies[1])
+		}
+	}
+}
+
+func TestBlockRetryDisabledPassthrough(t *testing.T) {
+	var hits int
+	_, gate := newTestProxy(t, []string{"k1"}, func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"promptFeedback":{"blockReason":"SAFETY"}}`))
+	})
+
+	resp, raw := post(t, gate.URL+"/v1beta/models/gemini-2.0-flash:generateContent", `{"contents":[]}`)
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200 (block passed through)", resp.StatusCode)
+	}
+	if string(raw) != `{"promptFeedback":{"blockReason":"SAFETY"}}` {
+		t.Errorf("body = %q, want exact upstream block body", raw)
+	}
+	if hits != 1 {
+		t.Errorf("upstream hits = %d, want 1 (block retry disabled)", hits)
+	}
+}
+
+func TestBlockRetryStreaming(t *testing.T) {
+	var hits int
+	var lastBody string
+	_, gate := newBlockRetryProxy(t, []string{"k1"}, 1, func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		raw, _ := io.ReadAll(r.Body)
+		lastBody = string(raw)
+		w.Header().Set("Content-Type", "text/event-stream")
+		if hits == 1 {
+			fmt.Fprint(w, "data: {\"promptFeedback\":{\"blockReason\":\"SAFETY\"}}\n\n")
+			return
+		}
+		fmt.Fprint(w, "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hi\"}]}}]}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	})
+
+	resp, raw := post(t, gate.URL+"/v1beta/models/gemini-2.0-flash:streamGenerateContent", `{"contents":[]}`)
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if hits != 2 {
+		t.Fatalf("upstream hits = %d, want 2", hits)
+	}
+	if !strings.Contains(string(raw), `"text":"hi"`) {
+		t.Errorf("retried SSE body = %q, want candidate text", raw)
+	}
+	if !strings.Contains(lastBody, "卡了，继续") {
+		t.Errorf("retried stream request body missing continue message: %s", lastBody)
+	}
+}
+
+func TestBlockRetryExhaustedPassthrough(t *testing.T) {
+	var hits int
+	_, gate := newBlockRetryProxy(t, []string{"k1"}, 1, func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"promptFeedback":{"blockReason":"SAFETY"}}`))
+	})
+
+	resp, raw := post(t, gate.URL+"/v1beta/models/gemini-2.0-flash:generateContent", `{"contents":[]}`)
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if string(raw) != `{"promptFeedback":{"blockReason":"SAFETY"}}` {
+		t.Errorf("body = %q, want still-blocked upstream body", raw)
+	}
+	if hits != 2 {
+		t.Errorf("upstream hits = %d, want 2 (1 original + 1 retry then passthrough)", hits)
+	}
+}
+
+func TestBlockRetryNonContentEndpointUnaffected(t *testing.T) {
+	var hits int
+	_, gate := newBlockRetryProxy(t, []string{"k1"}, 1, func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"promptFeedback":{"blockReason":"SAFETY"}}`))
+	})
+
+	// models 列表端点没有 contents，不应触发拦截重试
+	resp, raw := post(t, gate.URL+"/v1beta/models", `{}`)
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if string(raw) != `{"promptFeedback":{"blockReason":"SAFETY"}}` {
+		t.Errorf("body = %q, want passthrough", raw)
+	}
+	if hits != 1 {
+		t.Errorf("upstream hits = %d, want 1 (no block retry on non-content endpoint)", hits)
+	}
+}
+
+func TestResponseBlockedDetection(t *testing.T) {
+	cases := []struct {
+		name        string
+		body        string
+		contentType string
+		want        bool
+	}{
+		{"obj-blocked", `{"promptFeedback":{"blockReason":"SAFETY"}}`, "application/json", true},
+		{"obj-candidate-safety", `{"candidates":[{"finishReason":"SAFETY"}]}`, "application/json", true},
+		{"obj-normal", `{"candidates":[{"content":{"parts":[{"text":"hi"}]}}]}`, "application/json", false},
+		{"array-blocked", `[{"promptFeedback":{"blockReason":"SAFETY"}}]`, "application/json", true},
+		{"sse-blocked", "data: {\"promptFeedback\":{\"blockReason\":\"SAFETY\"}}\n\n", "text/event-stream", true},
+		{"sse-normal", "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hi\"}]}}]}\n\ndata: [DONE]\n\n", "text/event-stream", false},
+		{"empty", "", "application/json", false},
+	}
+	for _, c := range cases {
+		if got := responseBlocked([]byte(c.body), c.contentType); got != c.want {
+			t.Errorf("%s: blocked = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestResponseBlockedGzip(t *testing.T) {
+	plain := `{"promptFeedback":{"blockReason":"SAFETY"}}`
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	zw.Write([]byte(plain))
+	zw.Close()
+	if !responseBlocked(buf.Bytes(), "application/json") {
+		t.Error("gzip blocked body not detected")
+	}
+}
+
+func TestAppendContinueMessages(t *testing.T) {
+	in := `{"contents":[{"role":"user","parts":[{"text":"早上好"}]}],"systemInstruction":{"parts":[{"text":"你是助手"}]}}`
+	out, ok := appendContinueMessages([]byte(in), http.Header{})
+	if !ok {
+		t.Fatal("appendContinueMessages returned ok=false")
+	}
+	for _, want := range []string{"System:网络错误", "卡了，继续", "你是助手"} {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("output missing %q: %s", want, out)
+		}
+	}
+	var m map[string]any
+	if err := json.Unmarshal(out, &m); err != nil {
+		t.Fatalf("output not valid JSON: %v", err)
+	}
+	if _, ok := m["systemInstruction"]; !ok {
+		t.Error("systemInstruction field dropped")
+	}
+	contents, ok := m["contents"].([]any)
+	if !ok || len(contents) != 3 {
+		t.Fatalf("contents = %#v, want 3 entries (original + model + user)", m["contents"])
+	}
+}
+
+func TestAppendContinueMessagesGzip(t *testing.T) {
+	plain := `{"contents":[{"role":"user","parts":[{"text":"x"}]}]}`
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	zw.Write([]byte(plain))
+	zw.Close()
+
+	out, ok := appendContinueMessages(buf.Bytes(), http.Header{"Content-Encoding": []string{"gzip"}})
+	if !ok {
+		t.Fatal("appendContinueMessages gzip returned ok=false")
+	}
+	zr, err := gzip.NewReader(bytes.NewReader(out))
+	if err != nil {
+		t.Fatalf("output not gzip-encoded: %v", err)
+	}
+	decoded, _ := io.ReadAll(zr)
+	zr.Close()
+	if !strings.Contains(string(decoded), "卡了，继续") {
+		t.Errorf("gzip roundtrip missing continue message: %s", decoded)
+	}
+}
+
+func TestAppendContinueMessagesNonJSON(t *testing.T) {
+	if _, ok := appendContinueMessages([]byte("not-json"), http.Header{}); ok {
+		t.Error("appendContinueMessages should return ok=false for non-JSON body")
 	}
 }

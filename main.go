@@ -37,6 +37,7 @@ func main() {
 
 	pool := NewPool(cfg.Keys)
 	proxy := NewProxy(pool, cfg.Upstream, cfg.MaxRetries, time.Duration(cfg.RequestTimeout)*time.Second)
+	proxy.SetBlockRetry(cfg.blockRetryEnabled(), cfg.MaxBlockRetries)
 	web := &WebUI{pool: pool, adminPassword: cfg.AdminPassword, configPath: *configPath}
 
 	// protect 为管理 API 套 Bearer Token 认证（密码保证非空，见上方生成逻辑）
@@ -68,6 +69,8 @@ func main() {
 		"keys", len(cfg.Keys),
 		"max_retries", cfg.MaxRetries,
 		"request_timeout", cfg.RequestTimeout,
+		"block_retry", cfg.blockRetryEnabled(),
+		"max_block_retries", cfg.MaxBlockRetries,
 	)
 
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {

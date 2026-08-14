@@ -9,20 +9,28 @@ import (
 )
 
 const (
-	defaultListen        = ":8080"
-	defaultUpstream      = "https://generativelanguage.googleapis.com"
-	defaultMaxRetry      = 5
-	defaultRequestTimeout = 30 // 上游响应头等待超时秒数
-	defaultRPMLock       = 60 // 非 RPD 的 429 固定冷却秒数
+	defaultListen          = ":8080"
+	defaultUpstream        = "https://generativelanguage.googleapis.com"
+	defaultMaxRetry        = 5
+	defaultRequestTimeout  = 30 // 上游响应头等待超时秒数
+	defaultRPMLock         = 60 // 非 RPD 的 429 固定冷却秒数
+	defaultMaxBlockRetries = 1  // 安全拦截自动重试次数上限
 )
 
 type Config struct {
-	Listen        string   `json:"listen"`
-	Upstream      string   `json:"upstream"`
-	MaxRetries    int      `json:"max_retries"`
-	RequestTimeout int      `json:"request_timeout"` // 秒；上游未在超时内发出响应头则网关直接回 503
-	Keys          []string `json:"keys"`
-	AdminPassword string   `json:"admin_password"` // WebUI/管理 API 的 Basic Auth 密码，留空则无认证
+	Listen          string   `json:"listen"`
+	Upstream        string   `json:"upstream"`
+	MaxRetries      int      `json:"max_retries"`
+	RequestTimeout  int      `json:"request_timeout"`   // 秒；上游未在超时内发出响应头则网关直接回 503
+	BlockRetry      *bool    `json:"block_retry"`       // 安全拦截自动重试；省略字段时默认开启
+	MaxBlockRetries int      `json:"max_block_retries"` // 安全拦截自动重试次数上限（默认 1）
+	Keys            []string `json:"keys"`
+	AdminPassword   string   `json:"admin_password"` // WebUI/管理 API 的 Basic Auth 密码，留空则无认证
+}
+
+// blockRetryEnabled 返回安全拦截自动重试开关；省略 block_retry 字段时默认开启。
+func (c *Config) blockRetryEnabled() bool {
+	return c.BlockRetry == nil || *c.BlockRetry
 }
 
 func (c *Config) applyDefaults() {
@@ -37,6 +45,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.RequestTimeout <= 0 {
 		c.RequestTimeout = defaultRequestTimeout
+	}
+	if c.MaxBlockRetries <= 0 {
+		c.MaxBlockRetries = defaultMaxBlockRetries
 	}
 }
 
