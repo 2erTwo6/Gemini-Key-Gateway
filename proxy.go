@@ -94,6 +94,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			kind := consumeAndClassify429(resp)
 			p.pool.LockModel(key.id, model, kind)
 			slog.Warn("key locked", "key", key.id, "model", model, "kind", kind)
+			if kind == LockTPM {
+				// TPM：请求自身的 token 数已超限，换 Key 重试无济于事，
+				// 直接透传 429 给客户端，不再消耗其他 Key。
+				copyResponse(w, resp)
+				return
+			}
 			last = resp
 			continue
 		case resp.StatusCode >= 500:
@@ -183,7 +189,11 @@ func isHopByHop(name string) bool {
 }
 
 // consumeAndClassify429 读取 429 响应体并判定限流类型：
-// quotaId 含 "PerDay" → RPD 锁定；否则按 RPM 短冷却处理。
+//   - quotaId 含 "PerDay"           → RPD：锁到当日额度刷新点
+//   - quotaId 含 "PerMinute"+"Tokens"（如 GenerateContentInputTokensPerModelPerMinute-*）
+//     → TPM：锁 rpmLockDur，不换 Key 重试，直接透传
+//   - 其余（请求数超限等）            → RPM：锁 rpmLockDur 后换 Key 重试
+//
 // 读完 body 后重建以便后续透传。
 func consumeAndClassify429(resp *http.Response) LockKind {
 	body, _ := io.ReadAll(resp.Body)
@@ -203,8 +213,11 @@ func consumeAndClassify429(resp *http.Response) LockKind {
 	if json.Unmarshal(body, &payload) == nil {
 		for _, d := range payload.Error.Details {
 			for _, v := range d.QuotaFailure.Violations {
-				if strings.Contains(v.QuotaID, "PerDay") {
+				switch {
+				case strings.Contains(v.QuotaID, "PerDay"):
 					return LockRPD
+				case strings.Contains(v.QuotaID, "PerMinute") && strings.Contains(v.QuotaID, "Tokens"):
+					return LockTPM
 				}
 			}
 		}

@@ -22,6 +22,7 @@ type LockKind string
 const (
 	LockRPD LockKind = "rpd" // 锁定到当日额度刷新点
 	LockRPM LockKind = "rpm" // 固定冷却 defaultRPMLock 秒
+	LockTPM LockKind = "tpm" // token 超限：固定冷却 defaultRPMLock 秒，不换 Key 重试
 )
 
 type modelLock struct {
@@ -167,7 +168,7 @@ func (p *Pool) RecordFailure(id string, status int) {
 }
 
 // LockModel 429：按类型锁定 Key×Model。
-// RPD 锁到下一刷新点；RPM 锁 rpmLockDur。只延长不缩短已有锁。
+// RPD 锁到下一刷新点；RPM/TPM 锁 rpmLockDur。只延长不缩短已有锁。
 func (p *Pool) LockModel(id, model string, kind LockKind) {
 	if model == "" {
 		return

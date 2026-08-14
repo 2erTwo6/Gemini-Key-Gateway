@@ -13,7 +13,8 @@ Gemini API Key 轮询网关：自动切换无效 Key，忠实透传请求/响应
   - `4xx`（429 除外）→ 该 Key **永久失效**，换 Key 重试
   - `429` → 解析响应体 `quotaId` 区分限流类型：
     - **RPD**（含 `PerDay`）→ 锁定该 **Key×Model** 至当日额度刷新点（美国太平洋时间午夜，即北京时间夏令时 15:00 / 冬令时 16:00，自动适配 DST），到点自动赦免
-    - **RPM**（含 `PerMinute`）及其他 429 → 该 **Key×Model** 固定冷却 60s 后自动恢复
+    - **TPM**（含 `PerMinute`+`Tokens`，如 `GenerateContentInputTokensPerModelPerMinute-*`）→ 该 **Key×Model** 固定冷却 60s；请求自身的 token 数已超限，**不换 Key 重试**，直接透传 429 给客户端，避免把所有 Key 逐一误锁
+    - **RPM**（含 `PerMinute`）及其他 429 → 该 **Key×Model** 固定冷却 60s 后自动恢复，换 Key 重试
   - `5xx` → 不重试，原样透传错误
   - **网络错误/响应头超时**（`request_timeout` 内上游无响应，如挂起、满载排队）→ 不重试、不标记 Key，网关直接回 `503`（`The Gemini API did not provide any response before timing out.`），由下游自行重试/降级
   - 重试耗尽 → **原样透传最后一次上游响应**（状态码/响应头/响应体）
@@ -176,7 +177,7 @@ go vet ./...
 go test -race -count=1 ./...                                  # 全量测试（含并发竞态检测）
 ```
 
-测试覆盖：Key 轮询、4xx 失效切换、RPD 锁定至刷新点赦免（含 DST 边界）、RPM 60s 冷却、5xx 透传、重试耗尽透传最后响应、响应头超时网关自回 503 且不重试、SSE 逐字节一致与流式到达、客户端 key 剥离、WebUI 认证、高并发无竞态。
+测试覆盖：Key 轮询、4xx 失效切换、RPD 锁定至刷新点赦免（含 DST 边界）、RPM 60s 冷却、TPM 锁定并透传不重试、5xx 透传、重试耗尽透传最后响应、响应头超时网关自回 503 且不重试、SSE 逐字节一致与流式到达、客户端 key 剥离、WebUI 认证、高并发无竞态。
 
 ## 文件结构
 

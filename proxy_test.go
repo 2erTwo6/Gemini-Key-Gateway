@@ -121,6 +121,70 @@ func Test429RPMShortCooldown(t *testing.T) {
 	}
 }
 
+func TestClassify429(t *testing.T) {
+	cases := []struct {
+		name    string
+		quotaID string
+		want    LockKind
+	}{
+		{"rpd", "GenerateRequestsPerDayPerProjectPerModel-FreeTier", LockRPD},
+		{"rpd-input-tokens", "GenerateContentInputTokensPerDayFreeTier", LockRPD},
+		{"rpm", "GenerateRequestsPerMinutePerProjectPerModel-FreeTier", LockRPM},
+		{"tpm-input", "GenerateContentInputTokensPerModelPerMinute-FreeTier", LockTPM},
+		{"tpm-output", "GenerateContentOutputTokensPerMinutePerProjectPerModel", LockTPM},
+		{"no-quota-details", "", LockRPM}, // 解析不到 quotaId 时按 RPM 兜底
+	}
+	for _, c := range cases {
+		var body string
+		if c.quotaID == "" {
+			body = `{"error":{"code":429}}`
+		} else {
+			body = fmt.Sprintf(`{"error":{"details":[{"@type":"type.googleapis.com/google.rpc.QuotaFailure","quotaFailure":{"violations":[{"quotaId":%q}]}}]}}`, c.quotaID)
+		}
+		resp := &http.Response{Body: io.NopCloser(strings.NewReader(body))}
+		if got := consumeAndClassify429(resp); got != c.want {
+			t.Errorf("%s: classify = %s, want %s", c.name, got, c.want)
+		}
+		// body 必须被重建，供后续透传使用
+		rebuilt, _ := io.ReadAll(resp.Body)
+		if string(rebuilt) != body {
+			t.Errorf("%s: body not restored for passthrough", c.name)
+		}
+	}
+}
+
+func Test429TPMLockAndPassthroughNoRetry(t *testing.T) {
+	tpmBody := `{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_input_token_count, limit: 250000","details":[{"@type":"type.googleapis.com/google.rpc.QuotaFailure","quotaFailure":{"violations":[{"quotaId":"GenerateContentInputTokensPerModelPerMinute-FreeTier","quotaValue":"250000"}]}}]}}`
+	var hits int
+	pool, gate := newTestProxy(t, []string{"k1", "k2"}, func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.WriteHeader(429)
+		w.Write([]byte(tpmBody))
+	})
+
+	resp, raw := post(t, gate.URL+"/v1beta/models/gemini-2.0-flash:generateContent", `{}`)
+	if resp.StatusCode != 429 {
+		t.Fatalf("status = %d, want 429 (exact passthrough)", resp.StatusCode)
+	}
+	if string(raw) != tpmBody {
+		t.Errorf("body = %q, want exact upstream TPM body", raw)
+	}
+	if hits != 1 {
+		t.Errorf("upstream hits = %d, want 1 (TPM must NOT retry other keys)", hits)
+	}
+	snap := pool.Snapshot()
+	lock, ok := snap.Keys[0].Locks["gemini-2.0-flash"]
+	if !ok || lock.Kind != string(LockTPM) {
+		t.Fatalf("k1 should be TPM-locked, got %+v", snap.Keys[0].Locks)
+	}
+	if until := lock.Until.Sub(time.Now()); until > 65*time.Second || until < 55*time.Second {
+		t.Errorf("TPM lock duration = %v, want ~60s", until)
+	}
+	if len(snap.Keys[1].Locks) != 0 || snap.Keys[1].Requests != 0 {
+		t.Errorf("k2 must be untouched: locks=%v requests=%d", snap.Keys[1].Locks, snap.Keys[1].Requests)
+	}
+}
+
 func Test5xxPassThroughNoRetry(t *testing.T) {
 	var hits int
 	pool, gate := newTestProxy(t, []string{"k1", "k2"}, func(w http.ResponseWriter, r *http.Request) {

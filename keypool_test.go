@@ -85,6 +85,25 @@ func TestRPMLockExpires(t *testing.T) {
 	}
 }
 
+func TestTPMLockExpires(t *testing.T) {
+	base := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	cur := base
+	p := NewPool([]string{"k1"},
+		WithClock(func() time.Time { return cur }),
+		WithRPMLock(100*time.Millisecond),
+	)
+	id := shortID("k1")
+	p.LockModel(id, "m", LockTPM)
+
+	if k := p.Pick("m"); k != nil {
+		t.Fatal("k1 should be TPM-locked")
+	}
+	cur = base.Add(101 * time.Millisecond)
+	if k := p.Pick("m"); k == nil {
+		t.Fatal("k1 should be usable after cooldown")
+	}
+}
+
 func TestRPDLockUntilRefresh(t *testing.T) {
 	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
 	refresh := time.Date(2026, 7, 21, 7, 0, 0, 0, time.UTC)
