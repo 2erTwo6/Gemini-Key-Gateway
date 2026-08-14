@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
 	"fmt"
 	"io"
 	"net/http"
@@ -126,20 +127,35 @@ func TestClassify429(t *testing.T) {
 		name    string
 		quotaID string
 		want    LockKind
+		flat    bool // true: violations 直接挂 details[i]（实测格式）；false: 嵌套 quotaFailure（文档格式）
+		array   bool // true: 流式端点格式，body 为 JSON 数组 [{...}]
 	}{
-		{"rpd", "GenerateRequestsPerDayPerProjectPerModel-FreeTier", LockRPD},
-		{"rpd-input-tokens", "GenerateContentInputTokensPerDayFreeTier", LockRPD},
-		{"rpm", "GenerateRequestsPerMinutePerProjectPerModel-FreeTier", LockRPM},
-		{"tpm-input", "GenerateContentInputTokensPerModelPerMinute-FreeTier", LockTPM},
-		{"tpm-output", "GenerateContentOutputTokensPerMinutePerProjectPerModel", LockTPM},
-		{"no-quota-details", "", LockRPM}, // 解析不到 quotaId 时按 RPM 兜底
+		{"rpd", "GenerateRequestsPerDayPerProjectPerModel-FreeTier", LockRPD, false, false},
+		{"rpd-input-tokens", "GenerateContentInputTokensPerDayFreeTier", LockRPD, false, false},
+		{"rpm", "GenerateRequestsPerMinutePerProjectPerModel-FreeTier", LockRPM, false, false},
+		{"tpm-input", "GenerateContentInputTokensPerModelPerMinute-FreeTier", LockTPM, false, false},
+		{"tpm-output", "GenerateContentOutputTokensPerMinutePerProjectPerModel", LockTPM, false, false},
+		{"tpm-flat", "GenerateContentInputTokensPerModelPerMinute-FreeTier", LockTPM, true, false},
+		{"rpm-flat", "GenerateRequestsPerMinutePerProjectPerModel-FreeTier", LockRPM, true, false},
+		{"rpd-flat", "GenerateRequestsPerDayPerProjectPerModel-FreeTier", LockRPD, true, false},
+		{"tpm-stream-array", "GenerateContentInputTokensPerModelPerMinute-FreeTier", LockTPM, true, true},
+		{"rpm-stream-array", "GenerateRequestsPerMinutePerProjectPerModel-FreeTier", LockRPM, true, true},
+		{"unknown-quota-id", "SomeFutureQuotaNamePerHour", LockTPM, true, false}, // 无法识别的 quotaId → 兜底 TPM
+		{"no-quota-details", "", LockTPM, false, false},                          // 解析不到 quotaId → 兜底 TPM
 	}
 	for _, c := range cases {
 		var body string
 		if c.quotaID == "" {
 			body = `{"error":{"code":429}}`
+		} else if c.flat {
+			// 实测 Gemini API 格式：@type 标记 + violations 直接挂 details[i]
+			body = fmt.Sprintf(`{"error":{"details":[{"@type":"type.googleapis.com/google.rpc.QuotaFailure","violations":[{"quotaId":%q}]}]}}`, c.quotaID)
 		} else {
 			body = fmt.Sprintf(`{"error":{"details":[{"@type":"type.googleapis.com/google.rpc.QuotaFailure","quotaFailure":{"violations":[{"quotaId":%q}]}}]}}`, c.quotaID)
+		}
+		if c.array {
+			// 流式端点（streamGenerateContent）429 响应为 JSON 数组
+			body = "[" + body + "]"
 		}
 		resp := &http.Response{Body: io.NopCloser(strings.NewReader(body))}
 		if got := consumeAndClassify429(resp); got != c.want {
@@ -153,8 +169,44 @@ func TestClassify429(t *testing.T) {
 	}
 }
 
+func TestClassify429Gzip(t *testing.T) {
+	// 客户端带 Accept-Encoding: gzip 时，上游 429 响应体为 gzip 压缩字节
+	plain := `{"error":{"details":[{"@type":"type.googleapis.com/google.rpc.QuotaFailure","violations":[{"quotaId":"GenerateContentInputTokensPerModelPerMinute-FreeTier"}]}]}}`
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	zw.Write([]byte(plain))
+	zw.Close()
+	gz := buf.Bytes()
+
+	resp := &http.Response{Body: io.NopCloser(bytes.NewReader(gz))}
+	if got := consumeAndClassify429(resp); got != LockTPM {
+		t.Errorf("gzip body classify = %s, want %s", got, LockTPM)
+	}
+	// 透传必须保持 gzip 原样
+	rebuilt, _ := io.ReadAll(resp.Body)
+	if !bytes.Equal(rebuilt, gz) {
+		t.Errorf("gzip body not preserved for passthrough")
+	}
+
+	// gzip 数组格式（流式端点 + gzip 头）
+	var bufArr bytes.Buffer
+	zwArr := gzip.NewWriter(&bufArr)
+	zwArr.Write([]byte(`[` + plain + `]`))
+	zwArr.Close()
+	gzArr := bufArr.Bytes()
+	resp2 := &http.Response{Body: io.NopCloser(bytes.NewReader(gzArr))}
+	if got := consumeAndClassify429(resp2); got != LockTPM {
+		t.Errorf("gzip array body classify = %s, want %s", got, LockTPM)
+	}
+	rebuilt2, _ := io.ReadAll(resp2.Body)
+	if !bytes.Equal(rebuilt2, gzArr) {
+		t.Errorf("gzip array body not preserved for passthrough")
+	}
+}
+
 func Test429TPMLockAndPassthroughNoRetry(t *testing.T) {
-	tpmBody := `{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_input_token_count, limit: 250000","details":[{"@type":"type.googleapis.com/google.rpc.QuotaFailure","quotaFailure":{"violations":[{"quotaId":"GenerateContentInputTokensPerModelPerMinute-FreeTier","quotaValue":"250000"}]}}]}}`
+	// 实测 Gemini API 429 响应格式：violations 直接挂 details[i]（@type 标记），无 quotaFailure 嵌套
+	tpmBody := `{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_input_token_count, limit: 250000","details":[{"@type":"type.googleapis.com/google.rpc.QuotaFailure","violations":[{"quotaId":"GenerateContentInputTokensPerModelPerMinute-FreeTier","quotaValue":"250000"}]}]}}`
 	var hits int
 	pool, gate := newTestProxy(t, []string{"k1", "k2"}, func(w http.ResponseWriter, r *http.Request) {
 		hits++
@@ -179,6 +231,36 @@ func Test429TPMLockAndPassthroughNoRetry(t *testing.T) {
 	}
 	if until := lock.Until.Sub(time.Now()); until > 65*time.Second || until < 55*time.Second {
 		t.Errorf("TPM lock duration = %v, want ~60s", until)
+	}
+	if len(snap.Keys[1].Locks) != 0 || snap.Keys[1].Requests != 0 {
+		t.Errorf("k2 must be untouched: locks=%v requests=%d", snap.Keys[1].Locks, snap.Keys[1].Requests)
+	}
+}
+
+func Test429TPMStreamArrayLockAndPassthroughNoRetry(t *testing.T) {
+	// 流式端点（streamGenerateContent）实测：429 响应为 JSON 数组 [{...}]
+	tpmBody := `[{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_input_token_count, limit: 250000","details":[{"@type":"type.googleapis.com/google.rpc.QuotaFailure","violations":[{"quotaId":"GenerateContentInputTokensPerModelPerMinute-FreeTier","quotaValue":"250000"}]}]}}]`
+	var hits int
+	pool, gate := newTestProxy(t, []string{"k1", "k2"}, func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.WriteHeader(429)
+		w.Write([]byte(tpmBody))
+	})
+
+	resp, raw := post(t, gate.URL+"/v1beta/models/gemini-2.0-flash:streamGenerateContent", `{}`)
+	if resp.StatusCode != 429 {
+		t.Fatalf("status = %d, want 429 (exact passthrough)", resp.StatusCode)
+	}
+	if string(raw) != tpmBody {
+		t.Errorf("body = %q, want exact upstream TPM body", raw)
+	}
+	if hits != 1 {
+		t.Errorf("upstream hits = %d, want 1 (stream-array TPM must NOT retry other keys)", hits)
+	}
+	snap := pool.Snapshot()
+	lock, ok := snap.Keys[0].Locks["gemini-2.0-flash"]
+	if !ok || lock.Kind != string(LockTPM) {
+		t.Fatalf("k1 should be TPM-locked, got %+v", snap.Keys[0].Locks)
 	}
 	if len(snap.Keys[1].Locks) != 0 || snap.Keys[1].Requests != 0 {
 		t.Errorf("k2 must be untouched: locks=%v requests=%d", snap.Keys[1].Locks, snap.Keys[1].Requests)

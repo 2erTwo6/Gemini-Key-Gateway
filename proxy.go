@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"io"
@@ -93,7 +94,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		case resp.StatusCode == 429:
 			kind := consumeAndClassify429(resp)
 			p.pool.LockModel(key.id, model, kind)
-			slog.Warn("key locked", "key", key.id, "model", model, "kind", kind)
+			slog.Warn("key locked", "key", key.id, "model", model, "kind", kind, "path", r.URL.Path)
 			if kind == LockTPM {
 				// TPM：请求自身的 token 数已超限，换 Key 重试无济于事，
 				// 直接透传 429 给客户端，不再消耗其他 Key。
@@ -188,41 +189,99 @@ func isHopByHop(name string) bool {
 	return false
 }
 
+// quotaViolation 是 Google rpc QuotaFailure 的 violation 条目。
+type quotaViolation struct {
+	QuotaID string `json:"quotaId"`
+}
+
+// 429 响应体的 details 条目结构。Gemini API 实测有两种形态：
+//   - details[i].violations（@type=...QuotaFailure 直接挂 violations，实测格式）
+//   - details[i].quotaFailure.violations（文档示例格式）
+type quotaDetail struct {
+	QuotaFailure struct {
+		Violations []quotaViolation `json:"violations"`
+	} `json:"quotaFailure"`
+	Violations []quotaViolation `json:"violations"`
+}
+
+// 429 错误响应体（非流式端点）：{"error":{"details":[...]}}
+type quotaErrPayload struct {
+	Error struct {
+		Details []quotaDetail `json:"details"`
+	} `json:"error"`
+}
+
+// collectQuotaIDs 提取响应中所有 quotaId。
+func collectQuotaIDs(details []quotaDetail) []string {
+	var ids []string
+	for _, d := range details {
+		vs := d.Violations
+		if len(vs) == 0 {
+			vs = d.QuotaFailure.Violations
+		}
+		for _, v := range vs {
+			ids = append(ids, v.QuotaID)
+		}
+	}
+	return ids
+}
+
 // consumeAndClassify429 读取 429 响应体并判定限流类型：
 //   - quotaId 含 "PerDay"           → RPD：锁到当日额度刷新点
 //   - quotaId 含 "PerMinute"+"Tokens"（如 GenerateContentInputTokensPerModelPerMinute-*）
 //     → TPM：锁 rpmLockDur，不换 Key 重试，直接透传
-//   - 其余（请求数超限等）            → RPM：锁 rpmLockDur 后换 Key 重试
+//   - quotaId 含 "PerMinute"（请求数超限） → RPM：锁 rpmLockDur 后换 Key 重试
+//   - 解析不到 quotaId（未知/无法识别的 429）→ 兜底 TPM：只锁当前 Key×Model 并透传，
+//     不逐一重试耗尽整个 Key 池，保证健壮性
 //
-// 读完 body 后重建以便后续透传。
+// 注意响应体有几种形态，都要兼容：
+//   - 非流式端点 generateContent：{"error":{"details":[...]}}
+//   - 流式端点 streamGenerateContent：[{...}]（JSON 数组，无 alt=sse 时）
+//   - 客户端带 Accept-Encoding: gzip 时上游返回 gzip 压缩字节（先解压再解析）
+//
+// resp.Body 读完重建为原始字节（保持 gzip 原样），供后续透传给客户端。
 func consumeAndClassify429(resp *http.Response) LockKind {
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body = io.NopCloser(bytes.NewReader(body))
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body = io.NopCloser(bytes.NewReader(raw))
 
-	var payload struct {
-		Error struct {
-			Details []struct {
-				QuotaFailure struct {
-					Violations []struct {
-						QuotaID string `json:"quotaId"`
-					} `json:"violations"`
-				} `json:"quotaFailure"`
-			} `json:"details"`
-		} `json:"error"`
-	}
-	if json.Unmarshal(body, &payload) == nil {
-		for _, d := range payload.Error.Details {
-			for _, v := range d.QuotaFailure.Violations {
-				switch {
-				case strings.Contains(v.QuotaID, "PerDay"):
-					return LockRPD
-				case strings.Contains(v.QuotaID, "PerMinute") && strings.Contains(v.QuotaID, "Tokens"):
-					return LockTPM
-				}
+	body := raw
+	if len(raw) > 2 && raw[0] == 0x1f && raw[1] == 0x8b {
+		if zr, err := gzip.NewReader(bytes.NewReader(raw)); err == nil {
+			if plain, err := io.ReadAll(zr); err == nil {
+				body = plain
 			}
+			zr.Close()
 		}
 	}
-	return LockRPM
+
+	var ids []string
+	trimmed := bytes.TrimLeft(body, " \t\r\n")
+	if len(trimmed) > 0 && trimmed[0] == '[' {
+		var arr []quotaErrPayload
+		if json.Unmarshal(body, &arr) == nil {
+			for _, p := range arr {
+				ids = append(ids, collectQuotaIDs(p.Error.Details)...)
+			}
+		}
+	} else {
+		var obj quotaErrPayload
+		if json.Unmarshal(body, &obj) == nil {
+			ids = append(ids, collectQuotaIDs(obj.Error.Details)...)
+		}
+	}
+
+	kind := LockTPM // 兜底：无法识别限流类型时按 TPM 处理，不重试耗尽 Key 池
+	for _, id := range ids {
+		switch {
+		case strings.Contains(id, "PerDay"):
+			kind = LockRPD
+		case strings.Contains(id, "PerMinute") && strings.Contains(id, "Tokens"):
+			kind = LockTPM
+		case strings.Contains(id, "PerMinute"):
+			kind = LockRPM
+		}
+	}
+	return kind
 }
 
 // extractModel 从路径 /v1beta/models/{model}:generateContent 提取 model。
