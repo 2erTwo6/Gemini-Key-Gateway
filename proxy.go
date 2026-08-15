@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -32,6 +33,7 @@ type Proxy struct {
 	maxRetries      int
 	blockRetry      bool
 	maxBlockRetries int
+	blockRetryMode  string
 }
 
 func NewProxy(pool *Pool, upstream string, maxRetries int, requestTimeout time.Duration) *Proxy {
@@ -59,18 +61,28 @@ func NewProxy(pool *Pool, upstream string, maxRetries int, requestTimeout time.D
 // contents 末尾追加「model: System:网络错误」「user: 卡了，继续」两轮后复用同一 Key
 // 重试，最多重试 maxRetries 次（默认 1）。这利用上游「只检查最后一条 user 消息」的
 // 特性给模型更多思考空间以减少误报，并非真正绕过安全机制。
-func (p *Proxy) SetBlockRetry(enabled bool, maxRetries int) {
+//
+// mode 可选 BlockRetryModeFull（默认）或 BlockRetryModeStream：
+//   - full：完整缓冲 2xx 响应判定拦截，能发现流中途的 SAFETY 截断，但流式首字节延迟。
+//   - stream：只检查流式响应首块（SSE 首事件 / JSON 数组首元素），未拦截立即透传，
+//     保持流式实时性；流中途被安全截断不再重试，由客户端自行处理。
+func (p *Proxy) SetBlockRetry(enabled bool, maxRetries int, modes ...string) {
 	if maxRetries < 0 {
 		maxRetries = 0
 	}
 	p.blockRetry = enabled
 	p.maxBlockRetries = maxRetries
+	p.blockRetryMode = BlockRetryModeFull
+	if len(modes) > 0 && modes[0] != "" {
+		p.blockRetryMode = modes[0]
+	}
 }
 
 // ServeHTTP 转发到上游：轮询可用 Key、按响应分类重试、安全拦截自动重试、最后透传。
 // 请求体读入内存（重试需重放）；响应流式透传，零缓冲改写。
-// 注意：开启 blockRetry 时，content 端点（generateContent/streamGenerateContent）的 2xx
-// 响应会先整体读入内存以判定是否被安全拦截，未拦截时再逐字节透传（流式首字节因此后移）。
+// 注意：开启 blockRetry 且 mode=full（默认）时，content 端点（generateContent/streamGenerateContent）
+// 的 2xx 响应会先整体读入内存以判定是否被安全拦截，未拦截时再逐字节透传（流式首字节因此后移）。
+// mode=stream 时只缓冲流式响应首块做判定，未拦截立即透传，保持流式实时性。
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	model := extractModel(r.URL.Path)
 	body, err := io.ReadAll(r.Body)
@@ -106,7 +118,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		for resp.StatusCode >= 200 && resp.StatusCode < 300 &&
 			p.blockRetry && blockRetries < p.maxBlockRetries &&
 			isContentEndpoint(r.URL.Path) {
-			blocked, derr := p.readAndCheckBlock(resp)
+			blocked, derr := p.checkBlock(resp, r.URL.Path)
 			if derr != nil || !blocked {
 				break
 			}
@@ -129,6 +141,19 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 				http.Error(w, "The Gemini API did not provide any response before timing out.", http.StatusServiceUnavailable)
 				return
+			}
+		}
+
+		// full 模式下，重试后的最终 2xx 响应同样完整缓冲后再透传，保证
+		// “full = 非流式” 行为一致（否则会出现“首次响应非流式、重试响应反而流式”的怪象）。
+		if p.blockRetry && p.blockRetryMode == BlockRetryModeFull && blockRetries > 0 &&
+			resp.StatusCode >= 200 && resp.StatusCode < 300 && isContentEndpoint(r.URL.Path) {
+			blocked, derr := p.readAndCheckBlock(resp)
+			if derr != nil {
+				slog.Warn("final block check failed, passing through", "model", model, "err", derr)
+			} else if blocked {
+				slog.Info("safety block persists after block retries exhausted, passing through",
+					"model", model, "block_retries", blockRetries)
 			}
 		}
 
@@ -194,6 +219,11 @@ func (p *Proxy) forward(ctx context.Context, method string, src *url.URL, body [
 	}
 	req.Header.Del("x-goog-api-key") // 一律使用池中 Key
 	req.Header.Del("Content-Length") // 由 Go 依据新 body 重新计算（拦截重试会改写 body 长度）
+	if p.blockRetry && p.blockRetryMode == BlockRetryModeStream && isContentEndpoint(src.Path) {
+		// stream 模式需要检查流式响应首块，剥掉 Accept-Encoding 让上游返回未压缩流，
+		// 避免 gzip 无法按块判定；客户端同样能正常接收 identity 编码。
+		req.Header.Del("Accept-Encoding")
+	}
 	return p.client.Do(req)
 }
 
@@ -361,6 +391,131 @@ func (p *Proxy) readAndCheckBlock(resp *http.Response) (bool, error) {
 		return false, err
 	}
 	return responseBlocked(raw, resp.Header.Get("Content-Type")), nil
+}
+
+// checkBlock 按 blockRetryMode 选择拦截判定方式。
+func (p *Proxy) checkBlock(resp *http.Response, path string) (bool, error) {
+	if p.blockRetryMode == BlockRetryModeStream && strings.HasSuffix(path, ":streamGenerateContent") {
+		return p.checkFirstChunkBlock(resp)
+	}
+	return p.readAndCheckBlock(resp)
+}
+
+// firstChunkMaxBytes 是 stream 模式下为判定拦截最多缓冲的首块字节数。
+// 超过该上限仍无法判定时按未拦截透传，优先保证流式实时性。
+const firstChunkMaxBytes = 64 * 1024
+
+// readCloser 把重建后的多段 reader 与原响应 body 的 Close 绑定，保证上游连接最终被关闭。
+type readCloser struct {
+	io.Reader
+	io.Closer
+}
+
+// checkFirstChunkBlock 只检查流式响应首块：SSE 首事件或 JSON 数组首元素。
+// gzip 响应无法按块判定，回退到完整缓冲检查。
+func (p *Proxy) checkFirstChunkBlock(resp *http.Response) (bool, error) {
+	if strings.EqualFold(resp.Header.Get("Content-Encoding"), "gzip") {
+		return p.readAndCheckBlock(resp)
+	}
+	if strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
+		return p.checkFirstSSEEvent(resp)
+	}
+	return p.checkFirstJSONArrayElement(resp)
+}
+
+// checkFirstSSEEvent 读取首个 SSE 事件（到空行截止），仅对它判定是否被拦截；
+// 无论结果如何都会把已读字节与剩余流重建回 resp.Body，未拦截时立即透传。
+// 首事件超过 firstChunkMaxBytes 仍未结束时停止检查，按未拦截透传（截断的事件通常解析失败）。
+func (p *Proxy) checkFirstSSEEvent(resp *http.Response) (bool, error) {
+	br := bufio.NewReaderSize(resp.Body, 32*1024)
+	var first bytes.Buffer
+	for first.Len() < firstChunkMaxBytes {
+		frag, err := br.ReadSlice('\n')
+		first.Write(frag)
+		if err == bufio.ErrBufferFull {
+			continue // 单行超过缓冲区：继续读下一段，直到凑够上限或遇到换行
+		}
+		if err == io.EOF {
+			break // 流已结束（不足一个完整事件）
+		}
+		if err != nil {
+			resp.Body = &readCloser{Reader: io.MultiReader(bytes.NewReader(first.Bytes()), br), Closer: resp.Body}
+			return false, err
+		}
+		if string(frag) == "\n" || string(frag) == "\r\n" {
+			break // 空行 = 首事件结束
+		}
+	}
+	resp.Body = &readCloser{Reader: io.MultiReader(bytes.NewReader(first.Bytes()), br), Closer: resp.Body}
+	return sseBlocked(first.Bytes()), nil
+}
+
+// checkFirstJSONArrayElement 只检查 streamGenerateContent 无 alt=sse 时 JSON 数组流的
+// 第一个元素。先用 TeeReader 记录 decoder 实际消费的字节，再原样重建 body，保证
+// 透传字节级一致（decoder 的少量预读也会被完整回放）。
+func (p *Proxy) checkFirstJSONArrayElement(resp *http.Response) (bool, error) {
+	br := bufio.NewReaderSize(resp.Body, 32*1024)
+	var before bytes.Buffer // 数组起始 '[' 之前的空白
+	b, err := br.ReadByte()
+	for err == nil && isSpaceByte(b) {
+		before.WriteByte(b)
+		b, err = br.ReadByte()
+	}
+	if err != nil {
+		resp.Body = &readCloser{Reader: io.MultiReader(bytes.NewReader(before.Bytes()), br), Closer: resp.Body}
+		return false, nil // 空流，未拦截
+	}
+	if b != '[' {
+		// 不是数组流（例如非流式 JSON 对象），重建后回退完整缓冲检查。
+		prefix := append(before.Bytes(), b)
+		resp.Body = &readCloser{Reader: io.MultiReader(bytes.NewReader(prefix), br), Closer: resp.Body}
+		return p.readAndCheckBlock(resp)
+	}
+
+	var afterOpen bytes.Buffer // '[' 与首元素之间的空白
+	firstByte, err := br.ReadByte()
+	for err == nil && isSpaceByte(firstByte) {
+		afterOpen.WriteByte(firstByte)
+		firstByte, err = br.ReadByte()
+	}
+	if err != nil {
+		// 空数组 / 只有空白：无首元素可判，透传。
+		prefix := append(append(before.Bytes(), '['), afterOpen.Bytes()...)
+		resp.Body = &readCloser{Reader: io.MultiReader(bytes.NewReader(prefix), br), Closer: resp.Body}
+		return false, nil
+	}
+
+	var consumed bytes.Buffer
+	dec := json.NewDecoder(io.TeeReader(
+		io.MultiReader(bytes.NewReader([]byte{firstByte}), br), &consumed))
+	var raw json.RawMessage
+	if err := dec.Decode(&raw); err != nil {
+		// 首元素不是合法 JSON：把 decoder 已读字节放回后透传。
+		prefix := append(append(before.Bytes(), '['), afterOpen.Bytes()...)
+		prefix = append(prefix, consumed.Bytes()...)
+		resp.Body = &readCloser{Reader: io.MultiReader(bytes.NewReader(prefix), br), Closer: resp.Body}
+		return false, nil
+	}
+
+	var obj genBlockResp
+	blocked := json.Unmarshal(raw, &obj) == nil && obj.blocked()
+
+	// 原样重建：'[' 之前的空白 + '[' + '[' 后空白 + decoder 已消费字节 + 剩余流。
+	prefix := make([]byte, 0, before.Len()+1+afterOpen.Len()+consumed.Len())
+	prefix = append(prefix, before.Bytes()...)
+	prefix = append(prefix, '[')
+	prefix = append(prefix, afterOpen.Bytes()...)
+	prefix = append(prefix, consumed.Bytes()...)
+	resp.Body = &readCloser{Reader: io.MultiReader(bytes.NewReader(prefix), br), Closer: resp.Body}
+	return blocked, nil
+}
+
+func isSpaceByte(b byte) bool {
+	switch b {
+	case ' ', '\t', '\r', '\n':
+		return true
+	}
+	return false
 }
 
 // genBlockResp 是 GenerateContentResponse 中与安全拦截判定相关的字段。

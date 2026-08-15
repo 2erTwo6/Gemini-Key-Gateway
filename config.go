@@ -15,6 +15,12 @@ const (
 	defaultRequestTimeout  = 30 // 上游响应头等待超时秒数
 	defaultRPMLock         = 60 // 非 RPD 的 429 固定冷却秒数
 	defaultMaxBlockRetries = 0  // 安全拦截自动重试次数上限（0 = 默认关闭）
+
+	// BlockRetryModeFull 完整缓冲 content 端点 2xx 响应后判定拦截（默认，兼容旧行为）。
+	BlockRetryModeFull = "full"
+	// BlockRetryModeStream 只检查流式响应首块（SSE 首事件 / JSON 数组首元素），
+	// 未拦截时立即透传，保持流式实时性；流中途被安全截断不再重试。
+	BlockRetryModeStream = "stream"
 )
 
 type Config struct {
@@ -24,6 +30,7 @@ type Config struct {
 	RequestTimeout  int      `json:"request_timeout"`   // 秒；上游未在超时内发出响应头则网关直接回 503
 	BlockRetry      *bool    `json:"block_retry"`       // 安全拦截自动重试；省略字段时默认关闭
 	MaxBlockRetries int      `json:"max_block_retries"` // 安全拦截自动重试次数上限（默认 0 = 关闭）
+	BlockRetryMode  string   `json:"block_retry_mode"`  // full=完整缓冲检测（默认）| stream=只检测流式首块
 	Keys            []string `json:"keys"`
 	AdminPassword   string   `json:"admin_password"` // WebUI/管理 API 的 Basic Auth 密码，留空则无认证
 }
@@ -49,6 +56,9 @@ func (c *Config) applyDefaults() {
 	if c.MaxBlockRetries < 0 {
 		c.MaxBlockRetries = defaultMaxBlockRetries
 	}
+	if c.BlockRetryMode == "" {
+		c.BlockRetryMode = BlockRetryModeFull
+	}
 }
 
 func LoadConfig(path string) (*Config, error) {
@@ -69,6 +79,10 @@ func LoadConfig(path string) (*Config, error) {
 		}
 	}
 	cfg.applyDefaults()
+	if cfg.BlockRetryMode != BlockRetryModeFull && cfg.BlockRetryMode != BlockRetryModeStream {
+		return nil, fmt.Errorf("config %s: block_retry_mode must be %q or %q, got %q",
+			path, BlockRetryModeFull, BlockRetryModeStream, cfg.BlockRetryMode)
+	}
 	return &cfg, nil
 }
 

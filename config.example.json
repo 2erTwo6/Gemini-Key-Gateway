@@ -5,6 +5,7 @@
   "request_timeout": 30,
   "block_retry": false,
   "max_block_retries": 0,
+  "block_retry_mode": "full",
   "admin_password": "change-me",
   "keys": [
     "AIzaSyA...your-first-key...",

@@ -45,6 +45,19 @@ func newBlockRetryProxy(t *testing.T, keys []string, maxBlockRetries int, upstre
 	return pool, gate
 }
 
+// newBlockRetryStreamProxy 搭建启用 stream 模式安全拦截自动重试的链路。
+func newBlockRetryStreamProxy(t *testing.T, keys []string, maxBlockRetries int, upstreamHandler http.HandlerFunc) (*Pool, *httptest.Server) {
+	t.Helper()
+	up := httptest.NewServer(upstreamHandler)
+	t.Cleanup(up.Close)
+	pool := NewPool(keys)
+	proxy := NewProxy(pool, up.URL, 5, 5*time.Second)
+	proxy.SetBlockRetry(true, maxBlockRetries, BlockRetryModeStream)
+	gate := httptest.NewServer(proxy)
+	t.Cleanup(gate.Close)
+	return pool, gate
+}
+
 func post(t *testing.T, url, body string) (*http.Response, []byte) {
 	t.Helper()
 	resp, err := http.Post(url, "application/json", strings.NewReader(body))
@@ -555,6 +568,247 @@ func TestBlockRetryStreaming(t *testing.T) {
 	}
 	if !strings.Contains(lastBody, "卡了，继续") {
 		t.Errorf("retried stream request body missing continue message: %s", lastBody)
+	}
+}
+
+func TestBlockRetryFullModeRetriedResponseStillBuffered(t *testing.T) {
+	firstSent := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	doRelease := func() { releaseOnce.Do(func() { close(release) }) }
+	defer doRelease()
+
+	var hits int
+	_, gate := newBlockRetryProxy(t, []string{"k1"}, 1, func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl := w.(http.Flusher)
+		if hits == 1 {
+			fmt.Fprint(w, "data: {\"promptFeedback\":{\"blockReason\":\"SAFETY\"}}\n\n")
+			return
+		}
+		fmt.Fprint(w, "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hi\"}]}}]}\n\n")
+		fl.Flush()
+		close(firstSent)
+		<-release
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		fl.Flush()
+	})
+
+	type getResult struct {
+		resp *http.Response
+		err  error
+	}
+	got := make(chan getResult, 1)
+	go func() {
+		resp, err := http.Post(gate.URL+"/v1beta/models/gemini-2.0-flash:streamGenerateContent?alt=sse",
+			"application/json", strings.NewReader(`{"contents":[]}`))
+		got <- getResult{resp, err}
+	}()
+
+	select {
+	case <-firstSent:
+	case <-time.After(time.Second):
+		t.Fatal("upstream retry first event not sent")
+	}
+
+	// full 模式重试后的最终响应也必须完整缓冲：客户端不应在上游结束前收到任何字节
+	select {
+	case g := <-got:
+		if g.err == nil {
+			g.resp.Body.Close()
+		}
+		t.Fatalf("full mode must NOT stream retried response before upstream completes, got resp=%v err=%v", g.resp, g.err)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	doRelease()
+	select {
+	case g := <-got:
+		if g.err != nil {
+			t.Fatalf("get after upstream completed: %v", g.err)
+		}
+		defer g.resp.Body.Close()
+		raw, _ := io.ReadAll(g.resp.Body)
+		for _, want := range []string{"hi", "[DONE]"} {
+			if !strings.Contains(string(raw), want) {
+				t.Errorf("body = %q, want %q", raw, want)
+			}
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no response after upstream completed")
+	}
+	if hits != 2 {
+		t.Errorf("upstream hits = %d, want 2", hits)
+	}
+}
+
+func TestBlockRetryStreamModeSSEInitialBlockRetries(t *testing.T) {
+	var hits int
+	var lastBody string
+	_, gate := newBlockRetryStreamProxy(t, []string{"k1"}, 1, func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		raw, _ := io.ReadAll(r.Body)
+		lastBody = string(raw)
+		w.Header().Set("Content-Type", "text/event-stream")
+		if hits == 1 {
+			fmt.Fprint(w, "data: {\"promptFeedback\":{\"blockReason\":\"SAFETY\"}}\n\n")
+			return
+		}
+		fmt.Fprint(w, "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hi\"}]}}]}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	})
+
+	resp, raw := post(t, gate.URL+"/v1beta/models/gemini-2.0-flash:streamGenerateContent", `{"contents":[]}`)
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if hits != 2 {
+		t.Fatalf("upstream hits = %d, want 2 (initial SSE block must retry)", hits)
+	}
+	if !strings.Contains(string(raw), `"text":"hi"`) {
+		t.Errorf("retried SSE body = %q, want candidate text", raw)
+	}
+	if !strings.Contains(lastBody, "卡了，继续") {
+		t.Errorf("retried stream request body missing continue message: %s", lastBody)
+	}
+}
+
+func TestBlockRetryStreamModeOnlyFirstChunkChecked(t *testing.T) {
+	var hits int
+	_, gate := newBlockRetryStreamProxy(t, []string{"k1"}, 1, func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"你好\"}]}}]}\n\n")
+		fmt.Fprint(w, "data: {\"promptFeedback\":{\"blockReason\":\"SAFETY\"}}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	})
+
+	resp, raw := post(t, gate.URL+"/v1beta/models/gemini-2.0-flash:streamGenerateContent", `{"contents":[]}`)
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if hits != 1 {
+		t.Fatalf("upstream hits = %d, want 1 (mid-stream block must NOT retry in stream mode)", hits)
+	}
+	for _, want := range []string{"你好", "SAFETY"} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("passthrough body missing %q: %s", want, raw)
+		}
+	}
+}
+
+func TestBlockRetryStreamModeKeepsStreaming(t *testing.T) {
+	firstSent := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	doRelease := func() { releaseOnce.Do(func() { close(release) }) }
+	defer doRelease()
+
+	_, gate := newBlockRetryStreamProxy(t, []string{"k1"}, 1, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl := w.(http.Flusher)
+		fmt.Fprint(w, "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"你好\"}]}}]}\n\n")
+		fl.Flush()
+		close(firstSent)
+		<-release
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		fl.Flush()
+	})
+
+	resp, err := http.Get(gate.URL + "/v1beta/models/gemini-2.0-flash:streamGenerateContent?alt=sse")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	buf := make([]byte, 4096)
+	type readResult struct {
+		n   int
+		err error
+	}
+	got := make(chan readResult, 1)
+	go func() {
+		n, err := resp.Body.Read(buf)
+		got <- readResult{n, err}
+	}()
+
+	var first readResult
+	select {
+	case first = <-got:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("first SSE chunk not received while upstream still streaming (gateway buffering?)")
+	}
+	if first.err != nil && first.err != io.EOF {
+		t.Fatalf("first read error: %v", first.err)
+	}
+	if first.n == 0 {
+		t.Fatal("first read returned 0 bytes")
+	}
+	if !strings.Contains(string(buf[:first.n]), "你好") {
+		t.Errorf("first SSE chunk = %q, want candidate text", buf[:first.n])
+	}
+	select {
+	case <-firstSent:
+	default:
+		t.Error("upstream first event not flushed yet")
+	}
+
+	doRelease()
+	rest, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(rest), "[DONE]") {
+		t.Errorf("rest body = %q, want [DONE]", rest)
+	}
+}
+
+func TestBlockRetryStreamModeJSONArrayInitialBlockRetries(t *testing.T) {
+	var hits int
+	var lastBody string
+	_, gate := newBlockRetryStreamProxy(t, []string{"k1"}, 1, func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		raw, _ := io.ReadAll(r.Body)
+		lastBody = string(raw)
+		w.Header().Set("Content-Type", "application/json")
+		if hits == 1 {
+			fmt.Fprint(w, `[{"promptFeedback":{"blockReason":"SAFETY"}}]`)
+			return
+		}
+		fmt.Fprint(w, `[{"candidates":[{"content":{"parts":[{"text":"继续吧"}]}}]}]`)
+	})
+
+	resp, raw := post(t, gate.URL+"/v1beta/models/gemini-2.0-flash:streamGenerateContent", `{"contents":[{"role":"user","parts":[{"text":"早上好"}]}]}`)
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if hits != 2 {
+		t.Fatalf("upstream hits = %d, want 2 (initial JSON array block must retry)", hits)
+	}
+	if !strings.Contains(string(raw), "继续吧") {
+		t.Errorf("retried JSON array body = %q, want candidate text", raw)
+	}
+	if !strings.Contains(lastBody, "卡了，继续") {
+		t.Errorf("retried stream request body missing continue message: %s", lastBody)
+	}
+}
+
+func TestBlockRetryStreamModeJSONArrayPassthrough(t *testing.T) {
+	body := `[{"candidates":[{"content":{"parts":[{"text":"你好"}]}}]},{"promptFeedback":{"blockReason":"SAFETY"}}]`
+	var hits int
+	_, gate := newBlockRetryStreamProxy(t, []string{"k1"}, 1, func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, body)
+	})
+
+	resp, raw := post(t, gate.URL+"/v1beta/models/gemini-2.0-flash:streamGenerateContent", `{"contents":[]}`)
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if hits != 1 {
+		t.Fatalf("upstream hits = %d, want 1 (first element normal must NOT retry)", hits)
+	}
+	if string(raw) != body {
+		t.Errorf("body = %q, want exact upstream body %q", raw, body)
 	}
 }
 
