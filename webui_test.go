@@ -103,6 +103,22 @@ func TestWebUILoginAndTokenAuth(t *testing.T) {
 	}
 }
 
+func TestAddKeyBlankBatchNoPanic(t *testing.T) {
+	srv := newWebUI(t)
+
+	// 单元素空白 Key 批次不应触发 ids[0] 越界 panic。
+	resp, body := postJSON(t, srv.URL+"/api/keys", `{"keys":["   "]}`, "secret")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("blank batch: status = %d, want 200", resp.StatusCode)
+	}
+	if !strings.Contains(body, `"added":0`) {
+		t.Errorf("blank batch response = %q, want added=0", body)
+	}
+	if strings.Contains(body, `"id"`) {
+		t.Errorf("blank batch response = %q, should not contain id", body)
+	}
+}
+
 func TestHealthNoAuth(t *testing.T) {
 	srv := newWebUI(t)
 	resp, err := http.Get(srv.URL + "/health")

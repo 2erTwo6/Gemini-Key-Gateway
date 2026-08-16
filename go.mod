@@ -1,3 +1,3 @@
 module gemini-key-gateway
 
-go 1.26
+go 1.22

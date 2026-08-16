@@ -7,11 +7,13 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -28,9 +30,16 @@ var hopByHopHeaders = []string{
 }
 
 type Proxy struct {
-	pool            *Pool
-	client          *http.Client
-	upstream        *url.URL
+	pool *Pool
+
+	clientMu sync.RWMutex
+	client   *http.Client
+
+	upstreamMu sync.RWMutex
+	upstream   *url.URL
+
+	// cfgMu 保护下列可由 WebUI 运行时热更新的配置项。
+	cfgMu           sync.RWMutex
 	maxRetries      int
 	blockRetry      bool
 	maxBlockRetries int
@@ -38,11 +47,29 @@ type Proxy struct {
 	authKey         string // 非空时启用代理转发鉴权：客户端必须携带该密钥（通常为 admin_password）
 }
 
+// proxyConfig 是一次代理请求在启动时读取的运行时配置快照，
+// 保证同一请求内配置一致，避免热更新读到一半。
+type proxyConfig struct {
+	maxRetries      int
+	blockRetry      bool
+	maxBlockRetries int
+	blockRetryMode  string
+}
+
 func NewProxy(pool *Pool, upstream string, maxRetries int, requestTimeout time.Duration) *Proxy {
 	u, err := url.Parse(upstream)
 	if err != nil {
 		u, _ = url.Parse(defaultUpstream)
 	}
+	return &Proxy{
+		pool:       pool,
+		client:     newHTTPClient(requestTimeout),
+		upstream:   u,
+		maxRetries: maxRetries,
+	}
+}
+
+func newHTTPClient(requestTimeout time.Duration) *http.Client {
 	tr := &http.Transport{
 		DisableCompression:    true, // 不干预编码，保证透传忠实
 		MaxIdleConns:          256,
@@ -50,24 +77,56 @@ func NewProxy(pool *Pool, upstream string, maxRetries int, requestTimeout time.D
 		IdleConnTimeout:       90 * time.Second,
 		ResponseHeaderTimeout: requestTimeout,
 	}
-	return &Proxy{
-		pool:       pool,
-		client:     &http.Client{Transport: tr},
-		upstream:   u,
-		maxRetries: maxRetries,
-	}
+	return &http.Client{Transport: tr}
 }
 
 // SetAuthKey 设置代理转发的访问密钥。key 非空时，所有 /v1beta 请求必须先通过
 // requestAuthorized 鉴权（x-goog-api-key 头或 Authorization: Bearer），
 // 否则直接返回 401，不读取请求体、不触碰 Key 池。key 为空表示不启用鉴权。
 func (p *Proxy) SetAuthKey(key string) {
+	p.cfgMu.Lock()
 	p.authKey = key
+	p.cfgMu.Unlock()
+}
+
+// SetMaxRetries 热更新最大重试次数；负数按 0 处理（不重试）。
+func (p *Proxy) SetMaxRetries(n int) {
+	if n < 0 {
+		n = 0
+	}
+	p.cfgMu.Lock()
+	p.maxRetries = n
+	p.cfgMu.Unlock()
+}
+
+// SetUpstream 热更新上游地址，立即对后续请求生效（已在途请求不受影响）。
+func (p *Proxy) SetUpstream(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return fmt.Errorf("invalid upstream %q: must be an absolute URL like https://host", raw)
+	}
+	p.upstreamMu.Lock()
+	p.upstream = u
+	p.upstreamMu.Unlock()
+	return nil
+}
+
+// SetRequestTimeout 热更新上游响应头超时：替换 HTTP client（旧 client 的空闲连接会被关闭），
+// 已在途请求继续使用旧 client，后续请求使用新超时。
+func (p *Proxy) SetRequestTimeout(d time.Duration) {
+	p.clientMu.Lock()
+	old := p.client
+	p.client = newHTTPClient(d)
+	p.clientMu.Unlock()
+	if old != nil {
+		old.CloseIdleConnections()
+	}
 }
 
 // SetBlockRetry 配置安全拦截自动重试：检测到 content 端点响应被安全机制拦截
 // （promptFeedback.blockReason 非空或候选 finishReason 为 SAFETY 等）时，在请求体
-// contents 末尾追加一条「user: EOF」消息后复用同一 Key 重试，
+// contents 末尾追加一条「user: EOF」消息后，像普通重试一样从 Key 池
+// Pick 下一个可用 Key 重试，
 // 最多重试 maxRetries 次（默认 1）。这利用上游「只检查最后一条 user 消息」的特性
 // 减少误报，并非真正绕过安全机制。
 //
@@ -79,11 +138,26 @@ func (p *Proxy) SetBlockRetry(enabled bool, maxRetries int, modes ...string) {
 	if maxRetries < 0 {
 		maxRetries = 0
 	}
+	mode := BlockRetryModeFull
+	if len(modes) > 0 && modes[0] != "" {
+		mode = modes[0]
+	}
+	p.cfgMu.Lock()
 	p.blockRetry = enabled
 	p.maxBlockRetries = maxRetries
-	p.blockRetryMode = BlockRetryModeFull
-	if len(modes) > 0 && modes[0] != "" {
-		p.blockRetryMode = modes[0]
+	p.blockRetryMode = mode
+	p.cfgMu.Unlock()
+}
+
+// configSnapshot 读取当前运行时配置快照。
+func (p *Proxy) configSnapshot() proxyConfig {
+	p.cfgMu.RLock()
+	defer p.cfgMu.RUnlock()
+	return proxyConfig{
+		maxRetries:      p.maxRetries,
+		blockRetry:      p.blockRetry,
+		maxBlockRetries: p.maxBlockRetries,
+		blockRetryMode:  p.blockRetryMode,
 	}
 }
 
@@ -95,12 +169,16 @@ func (p *Proxy) SetBlockRetry(enabled bool, maxRetries int, modes ...string) {
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 代理转发鉴权：默认开启（authKey 由 main 注入 admin_password）。
 	// 在读取请求体、挑选 Key 之前拦截，未授权请求不触碰任何上游资源。
-	if p.authKey != "" && !requestAuthorized(r, p.authKey) {
+	p.cfgMu.RLock()
+	authKey := p.authKey
+	p.cfgMu.RUnlock()
+	if authKey != "" && !requestAuthorized(r, authKey) {
 		w.Header().Set("WWW-Authenticate", `Bearer realm="gemini-key-gateway"`)
 		http.Error(w, "unauthorized: invalid gateway key", http.StatusUnauthorized)
 		return
 	}
 
+	cfg := p.configSnapshot()
 	model := extractModel(r.URL.Path)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -110,13 +188,19 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var last *http.Response
-	for attempt := 0; attempt <= p.maxRetries; attempt++ {
+	blockRetries := 0
+	for attempt := 0; attempt <= cfg.maxRetries; attempt++ {
 		key := p.pool.Pick(model)
 		if key == nil {
 			slog.Warn("no usable key", "model", model, "attempt", attempt)
 			break
 		}
-		resp, err := p.forward(r.Context(), r.Method, r.URL, body, r.Header, key.key)
+		if last != nil {
+			// 即将发起下一次尝试，旧的“最后一次响应”不再需要，关闭以复用连接。
+			last.Body.Close()
+			last = nil
+		}
+		resp, err := p.forward(r.Context(), r.Method, r.URL, body, r.Header, key.key, cfg)
 		if err != nil {
 			p.pool.RecordFailure(key.id, 0)
 			slog.Warn("upstream request failed, returning 503", "key", key.id, "model", model, "err", err)
@@ -130,47 +214,29 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// 安全拦截自动重试（仅 content 生成端点）：2xx 但被安全机制拦截时，在请求体
-		// contents 末尾追加一条「user: EOF」后复用同一 Key 重试，以减少误报。
-		blockRetries := 0
-		for resp.StatusCode >= 200 && resp.StatusCode < 300 &&
-			p.blockRetry && blockRetries < p.maxBlockRetries &&
-			isContentEndpoint(r.URL.Path) {
-			blocked, derr := p.checkBlock(resp, r.URL.Path)
-			if derr != nil || !blocked {
-				break
-			}
-			resp.Body.Close()
-			blockRetries++
-			newBody, ok := appendContinueMessages(body, r.Header)
-			if !ok {
-				slog.Warn("block retry skipped: unable to rewrite request body", "model", model)
-				break
-			}
-			slog.Info("safety block detected, retrying with continue messages",
-				"key", key.id, "model", model, "block_retry", blockRetries)
-			body = newBody
-			resp, err = p.forward(r.Context(), r.Method, r.URL, body, r.Header, key.key)
-			if err != nil {
-				p.pool.RecordFailure(key.id, 0)
-				slog.Warn("upstream request failed during block retry, returning 503", "key", key.id, "model", model, "err", err)
-				if r.Context().Err() != nil {
-					return
-				}
-				http.Error(w, "The Gemini API did not provide any response before timing out.", http.StatusServiceUnavailable)
-				return
-			}
-		}
-
-		// full 模式下，重试后的最终 2xx 响应同样完整缓冲后再透传，保证
-		// “full = 非流式” 行为一致（否则会出现“首次响应非流式、重试响应反而流式”的怪象）。
-		if p.blockRetry && p.blockRetryMode == BlockRetryModeFull && blockRetries > 0 &&
-			resp.StatusCode >= 200 && resp.StatusCode < 300 && isContentEndpoint(r.URL.Path) {
-			blocked, derr := p.readAndCheckBlock(resp)
+		// contents 末尾追加一条「user: EOF」，然后像普通重试一样回到外层循环，
+		// 从 Key 池中 Pick 下一个可用 Key，不绑定上一个 Key。
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 &&
+			cfg.blockRetry && isContentEndpoint(r.URL.Path) {
+			blocked, derr := p.checkBlock(resp, r.URL.Path, cfg.blockRetryMode)
 			if derr != nil {
-				slog.Warn("final block check failed, passing through", "model", model, "err", derr)
+				slog.Warn("block check failed, passing through", "model", model, "err", derr)
 			} else if blocked {
-				slog.Info("safety block persists after block retries exhausted, passing through",
-					"model", model, "block_retries", blockRetries)
+				if blockRetries < cfg.maxBlockRetries {
+					newBody, ok := appendContinueMessages(body, r.Header)
+					if ok {
+						blockRetries++
+						body = newBody
+						slog.Info("safety block detected, retrying with continue messages",
+							"key", key.id, "model", model, "block_retry", blockRetries)
+						last = resp
+						continue
+					}
+					slog.Warn("block retry skipped: unable to rewrite request body", "model", model)
+				} else {
+					slog.Info("safety block persists after block retries exhausted, passing through",
+						"model", model, "block_retries", blockRetries)
+				}
 			}
 		}
 
@@ -213,10 +279,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // forward 构造上游请求：注入池中 Key（覆盖/剥离客户端 key），请求头忠实复制。
-func (p *Proxy) forward(ctx context.Context, method string, src *url.URL, body []byte, header http.Header, key string) (*http.Response, error) {
+func (p *Proxy) forward(ctx context.Context, method string, src *url.URL, body []byte, header http.Header, key string, cfg proxyConfig) (*http.Response, error) {
 	u := *src
-	u.Scheme = p.upstream.Scheme
-	u.Host = p.upstream.Host
+	p.upstreamMu.RLock()
+	up := p.upstream
+	p.upstreamMu.RUnlock()
+	u.Scheme = up.Scheme
+	u.Host = up.Host
 	q := u.Query()
 	q.Del("key")
 	q.Set("key", key)
@@ -236,12 +305,15 @@ func (p *Proxy) forward(ctx context.Context, method string, src *url.URL, body [
 	}
 	req.Header.Del("x-goog-api-key") // 一律使用池中 Key
 	req.Header.Del("Content-Length") // 由 Go 依据新 body 重新计算（拦截重试会改写 body 长度）
-	if p.blockRetry && p.blockRetryMode == BlockRetryModeStream && isContentEndpoint(src.Path) {
+	if cfg.blockRetry && cfg.blockRetryMode == BlockRetryModeStream && isContentEndpoint(src.Path) {
 		// stream 模式需要检查流式响应首块，剥掉 Accept-Encoding 让上游返回未压缩流，
 		// 避免 gzip 无法按块判定；客户端同样能正常接收 identity 编码。
 		req.Header.Del("Accept-Encoding")
 	}
-	return p.client.Do(req)
+	p.clientMu.RLock()
+	client := p.client
+	p.clientMu.RUnlock()
+	return client.Do(req)
 }
 
 // copyResponse 逐字节忠实透传：状态码与响应头逐字段原样复制
@@ -433,8 +505,8 @@ func (p *Proxy) readAndCheckBlock(resp *http.Response) (bool, error) {
 }
 
 // checkBlock 按 blockRetryMode 选择拦截判定方式。
-func (p *Proxy) checkBlock(resp *http.Response, path string) (bool, error) {
-	if p.blockRetryMode == BlockRetryModeStream && strings.HasSuffix(path, ":streamGenerateContent") {
+func (p *Proxy) checkBlock(resp *http.Response, path, mode string) (bool, error) {
+	if mode == BlockRetryModeStream && strings.HasSuffix(path, ":streamGenerateContent") {
 		return p.checkFirstChunkBlock(resp)
 	}
 	return p.readAndCheckBlock(resp)

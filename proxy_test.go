@@ -639,8 +639,8 @@ func TestBlockRetryAppendsContinueAndSucceeds(t *testing.T) {
 	if len(bodies) != 2 {
 		t.Fatalf("upstream hits = %d, want 2 (1 blocked + 1 retry)", len(bodies))
 	}
-	if keys[0] != keys[1] {
-		t.Errorf("block retry should reuse the same key, got %q then %q", keys[0], keys[1])
+	if keys[0] == keys[1] {
+		t.Errorf("block retry should pick the next key from the pool, got %q twice", keys[0])
 	}
 	for _, want := range []string{"EOF", `"role":"user"`} {
 		if !strings.Contains(bodies[1], want) {
@@ -649,6 +649,45 @@ func TestBlockRetryAppendsContinueAndSucceeds(t *testing.T) {
 	}
 	if strings.Contains(bodies[1], "System:网络错误") || strings.Contains(bodies[1], "卡了，继续") {
 		t.Errorf("retried body should only append a single user message: %s", bodies[1])
+	}
+}
+
+func TestBlockRetryThen429SwitchesKey(t *testing.T) {
+	var hits int
+	var keys []string
+	_, gate := newBlockRetryProxy(t, []string{"k1", "k2"}, 1, func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		keys = append(keys, keyInQuery(r))
+		w.Header().Set("Content-Type", "application/json")
+		switch hits {
+		case 1:
+			// 首次：2xx 但被安全拦截 → 触发 block retry（从池中 Pick 下一个 Key）。
+			w.Write([]byte(`{"promptFeedback":{"blockReason":"SAFETY"}}`))
+		case 2:
+			// 下一个 Key 正好 429（RPM）→ 应锁 Key×Model 并再换 Key 重试。
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.Write([]byte(`{"error":{"details":[{"violations":[{"quotaId":"GenerateContentRequestsPerModelPerMinute-gemini-2.0-flash"}]}]}}`))
+		default:
+			// 回到第一个 Key 后成功。
+			w.Write([]byte(`{"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}`))
+		}
+	})
+
+	resp, raw := post(t, gate.URL+"/v1beta/models/gemini-2.0-flash:generateContent", `{"contents":[{"role":"user","parts":[{"text":"早上好"}]}]}`)
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, raw)
+	}
+	if string(raw) != `{"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}` {
+		t.Errorf("body = %q, want final success body", raw)
+	}
+	if hits != 3 {
+		t.Fatalf("upstream hits = %d, want 3 (blocked → next-key 429 → first-key success)", hits)
+	}
+	if keys[0] == keys[1] {
+		t.Errorf("block retry should pick the next key from the pool, got %q twice", keys[0])
+	}
+	if keys[2] == keys[1] {
+		t.Errorf("after 429 the gateway should switch key again, got %q twice", keys[1])
 	}
 }
 

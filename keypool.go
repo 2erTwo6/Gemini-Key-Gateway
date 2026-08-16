@@ -210,13 +210,14 @@ func (p *Pool) SetState(id string, s KeyState) bool {
 	return true
 }
 
-func (p *Pool) Add(key string) string {
+// Add 添加 Key；返回其 ID 以及是否为新加入（false = 池中已存在，仅返回既有 ID）。
+func (p *Pool) Add(key string) (string, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	id := shortID(key)
 	for _, k := range p.keys {
 		if k.key == key {
-			return k.id
+			return k.id, false
 		}
 	}
 	p.keys = append(p.keys, &Key{
@@ -225,7 +226,7 @@ func (p *Pool) Add(key string) string {
 		state:     StateAvailable,
 		modelLock: make(map[string]modelLock),
 	})
-	return id
+	return id, true
 }
 
 func (p *Pool) Remove(id string) bool {

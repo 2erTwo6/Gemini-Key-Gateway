@@ -8,20 +8,22 @@
 :root { color-scheme: dark; }
 * { box-sizing: border-box; }
 body { font-family: system-ui, sans-serif; margin: 0; background: #11151c; color: #e6e9ef; }
-main { max-width: 1000px; margin: 0 auto; padding: 24px 16px 60px; }
+main { max-width: 1080px; margin: 0 auto; padding: 24px 16px 60px; }
 h1 { font-size: 20px; margin: 0 0 4px; }
-.sub { color: #8b93a1; font-size: 13px; margin-bottom: 20px; }
+.sub { color: #8b93a1; font-size: 13px; margin-bottom: 16px; }
 .cards { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
 .card { background: #1a2029; border: 1px solid #2a3340; border-radius: 10px; padding: 12px 18px; min-width: 120px; }
 .card .num { font-size: 26px; font-weight: 600; }
 .card .lbl { font-size: 12px; color: #8b93a1; }
 .card.warn .num { color: #f0b75e; }
 .card.bad .num { color: #e0665f; }
-table { width: 100%; border-collapse: collapse; background: #1a2029; border: 1px solid #2a3340; border-radius: 10px; overflow: hidden; }
-th, td { text-align: left; padding: 10px 12px; font-size: 13px; border-bottom: 1px solid #222b37; }
-th { background: #202834; color: #aab3c0; font-weight: 500; white-space: nowrap; }
+.tablewrap { overflow-x: auto; border-radius: 10px; }
+table { width: 100%; border-collapse: collapse; background: #1a2029; border: 1px solid #2a3340; }
+th, td { text-align: left; padding: 10px 12px; font-size: 13px; border-bottom: 1px solid #222b37; white-space: nowrap; }
+th { background: #202834; color: #aab3c0; font-weight: 500; }
 td.mono { font-family: ui-monospace, monospace; font-size: 12px; }
-.badge { display: inline-block; padding: 2px 9px; border-radius: 99px; font-size: 12px; }
+td.wrap { white-space: normal; min-width: 220px; }
+.badge { display: inline-block; padding: 2px 9px; border-radius: 99px; font-size: 12px; margin: 1px 2px 1px 0; }
 .badge.available { background: #1d3a2c; color: #5fd48c; }
 .badge.invalid { background: #3d2322; color: #f07c75; }
 .badge.disabled { background: #333; color: #9aa4b2; }
@@ -31,19 +33,47 @@ td.mono { font-family: ui-monospace, monospace; font-size: 12px; }
 button { background: #2a3340; color: #e6e9ef; border: 1px solid #3a4555; border-radius: 7px; padding: 6px 12px; cursor: pointer; font-size: 13px; }
 button:hover { background: #333e4f; }
 button.danger:hover { background: #4a2726; border-color: #6b3735; }
-button.ok:hover { background: #1f4a33; border-color: #2e6b48; }
+button.ok { background: #1f3a2e; border-color: #2e6b48; }
+button.ok:hover { background: #24553a; }
+button.warn { background: #3a3020; border-color: #6b5630; }
+button.warn:hover { background: #4a3d22; }
+button:disabled { opacity: .55; cursor: not-allowed; }
+.toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.tabs { display: flex; gap: 8px; margin-bottom: 16px; border-bottom: 1px solid #2a3340; }
+.tabs button { background: none; border: none; border-bottom: 2px solid transparent; border-radius: 0; padding: 9px 14px; color: #8b93a1; font-size: 14px; }
+.tabs button.active { color: #e6e9ef; border-bottom-color: #5fd48c; }
 .addrow { display: flex; gap: 8px; margin-bottom: 20px; align-items: flex-start; }
-.addrow input, .addrow textarea { flex: 1; background: #1a2029; color: #e6e9ef; border: 1px solid #2a3340; border-radius: 7px; padding: 8px 12px; font-size: 13px; }
+.addrow input, .addrow textarea, .formcard input, .formcard select, .formcard textarea {
+  flex: 1; background: #1a2029; color: #e6e9ef; border: 1px solid #2a3340; border-radius: 7px; padding: 8px 12px; font-size: 13px; width: 100%;
+}
 .addrow textarea { font-family: ui-monospace, monospace; min-height: 38px; resize: vertical; }
+.formcard { background: #1a2029; border: 1px solid #2a3340; border-radius: 10px; padding: 18px 20px; margin-bottom: 16px; }
+.formcard h2 { margin: 0 0 14px; font-size: 15px; }
+.formgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 14px 18px; }
+.field label { display: block; font-size: 13px; color: #aab3c0; margin-bottom: 6px; }
+.field .hint { font-size: 12px; color: #8b93a1; margin-top: 5px; line-height: 1.5; }
+.field input[type=checkbox] { width: auto; margin-right: 6px; }
+.checkline { display: flex; align-items: center; gap: 8px; }
+.badge.reqrestart { background: #3a3020; color: #e8b05c; font-size: 11px; padding: 1px 7px; margin-left: 6px; }
+.actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 4px; }
 .err { color: #f07c75; font-size: 13px; margin-top: 8px; }
-td .locks { font-size: 12px; color: #8b93a1; }
-.toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+.msg { position: fixed; right: 18px; bottom: 18px; max-width: 360px; padding: 12px 16px; border-radius: 10px; font-size: 13px; z-index: 99; box-shadow: 0 4px 18px rgba(0,0,0,.4); }
+.msg.ok { background: #1f3a2e; color: #7fe0a8; border: 1px solid #2e6b48; }
+.msg.err { background: #3d2322; color: #f07c75; border: 1px solid #6b3735; }
+.msg.info { background: #2a3548; color: #aac6f0; border: 1px solid #3a4f70; }
+td .locks { font-size: 12px; color: #8b93a1; white-space: normal; }
 .loginwrap { min-height: 100vh; display: flex; align-items: center; justify-content: center; }
-.logincard { background: #1a2029; border: 1px solid #2a3340; border-radius: 12px; padding: 32px 36px; width: 320px; text-align: center; }
+.logincard { background: #1a2029; border: 1px solid #2a3340; border-radius: 12px; padding: 32px 36px; width: 340px; text-align: center; }
 .logincard h2 { margin: 0 0 20px; font-size: 18px; }
 .logincard input { width: 100%; background: #11151c; color: #e6e9ef; border: 1px solid #2a3340; border-radius: 7px; padding: 10px 12px; font-size: 14px; margin-bottom: 14px; }
 .logincard button { width: 100%; padding: 10px; font-size: 14px; }
 .logincard .err { margin-top: 12px; }
+@media (max-width: 640px) {
+  .formgrid { grid-template-columns: 1fr; }
+  .cards { gap: 8px; }
+  .card { min-width: 90px; padding: 10px 12px; }
+  .card .num { font-size: 22px; }
+}
 </style>
 </head>
 <body>
@@ -63,29 +93,104 @@ td .locks { font-size: 12px; color: #8b93a1; }
       <h1>Gemini Key Gateway</h1>
       <div class="sub" id="sub">加载中…</div>
     </div>
-    <button onclick="logout()">退出</button>
+    <div style="display:flex; gap:8px">
+      <button onclick="switchTab('keys')">Key 池</button>
+      <button onclick="switchTab('settings')">设置</button>
+      <button class="danger" onclick="logout()">退出</button>
+    </div>
   </div>
 
-  <div class="cards">
-    <div class="card"><div class="num" id="c-total">-</div><div class="lbl">总 Key</div></div>
-    <div class="card"><div class="num" id="c-avail">-</div><div class="lbl">可用</div></div>
-    <div class="card warn"><div class="num" id="c-locked">-</div><div class="lbl">模型锁定</div></div>
-    <div class="card bad"><div class="num" id="c-invalid">-</div><div class="lbl">失效</div></div>
-    <div class="card"><div class="num" id="c-disabled">-</div><div class="lbl">禁用</div></div>
-  </div>
+  <section id="tab-keys">
+    <div class="cards">
+      <div class="card"><div class="num" id="c-total">-</div><div class="lbl">总 Key</div></div>
+      <div class="card"><div class="num" id="c-avail">-</div><div class="lbl">可用</div></div>
+      <div class="card warn"><div class="num" id="c-locked">-</div><div class="lbl">模型锁定</div></div>
+      <div class="card bad"><div class="num" id="c-invalid">-</div><div class="lbl">失效</div></div>
+      <div class="card"><div class="num" id="c-disabled">-</div><div class="lbl">禁用</div></div>
+    </div>
 
-  <div class="addrow">
-    <textarea id="newkey" rows="2" placeholder="输入 API Key，一行一个，支持批量添加…&#10;（Ctrl+Enter 提交）" autocomplete="off" spellcheck="false"></textarea>
-    <button class="ok" onclick="addKey()">添加</button>
-  </div>
+    <div class="addrow">
+      <textarea id="newkey" rows="2" placeholder="输入 API Key，一行一个，支持批量添加…&#10;（Ctrl+Enter 提交）" autocomplete="off" spellcheck="false"></textarea>
+      <button class="ok" onclick="addKey()">添加</button>
+    </div>
 
-  <table>
-    <thead><tr>
-      <th>ID</th><th>Key</th><th>状态</th><th>请求</th><th>失败</th>
-      <th>锁定 / 错误</th><th>操作</th>
-    </tr></thead>
-    <tbody id="rows"><tr><td colspan="7" style="color:#8b93a1">加载中…</td></tr></tbody>
-  </table>
+    <div class="tablewrap">
+      <table>
+        <thead><tr>
+          <th>ID</th><th>Key</th><th>状态</th><th>请求</th><th>失败</th>
+          <th>锁定 / 错误</th><th>操作</th>
+        </tr></thead>
+        <tbody id="rows"><tr><td colspan="7" style="color:#8b93a1">加载中…</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="tab-settings" style="display:none">
+    <div class="formcard">
+      <h2>运行配置</h2>
+      <div class="formgrid">
+        <div class="field">
+          <label>监听地址 <span class="badge reqrestart">需重启生效</span></label>
+          <input id="f-listen" name="listen" autocomplete="off" spellcheck="false">
+          <div class="hint">HTTP 服务监听地址，如 :8080 或 127.0.0.1:8080</div>
+        </div>
+        <div class="field">
+          <label>上游地址</label>
+          <input id="f-upstream" name="upstream" autocomplete="off" spellcheck="false">
+          <div class="hint">Gemini API 上游，修改后立即对后续请求生效</div>
+        </div>
+        <div class="field">
+          <label>最大重试次数</label>
+          <input id="f-maxretries" name="max_retries" type="number" min="0" step="1">
+          <div class="hint">总尝试 = max_retries + 1；填 0 表示不重试</div>
+        </div>
+        <div class="field">
+          <label>请求超时（秒）</label>
+          <input id="f-timeout" name="request_timeout" type="number" min="1" step="1">
+          <div class="hint">上游未在超时内发出响应头时，网关直接回 503</div>
+        </div>
+        <div class="field">
+          <label>安全拦截重试</label>
+          <div class="checkline">
+            <input id="f-blockretry" name="block_retry" type="checkbox">
+            <span style="font-size:13px">检测到 SAFETY 拦截时追加 user: EOF，然后从 Key 池 Pick 下一个可用 Key 重试</span>
+          </div>
+        </div>
+        <div class="field">
+          <label>拦截重试次数上限</label>
+          <input id="f-maxblock" name="max_block_retries" type="number" min="0" step="1">
+          <div class="hint">仅在开启「安全拦截重试」后有效；占用 max_retries 重试额度</div>
+        </div>
+        <div class="field">
+          <label>拦截检测模式</label>
+          <select id="f-blockmode" name="block_retry_mode">
+            <option value="full">full — 完整缓冲检测（默认，能发现流中途截断）</option>
+            <option value="stream">stream — 只检测流式首块（保持流式实时性）</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>代理转发鉴权</label>
+          <div class="checkline">
+            <input id="f-proxyauth" name="proxy_auth" type="checkbox">
+            <span style="font-size:13px">开启后 /v1beta 必须携带网关密钥（= 管理密码）</span>
+          </div>
+        </div>
+        <div class="field">
+          <label>管理密码</label>
+          <input id="f-password" name="admin_password" type="password" placeholder="留空则不修改" autocomplete="new-password">
+          <div class="hint">修改后立即生效；当前浏览器会话会自动使用新密码重新认证</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button class="ok" id="btn-save" onclick="saveConfig()">保存配置</button>
+      <button id="btn-reload" onclick="loadConfig()">重新加载</button>
+      <button class="warn" id="btn-restart" onclick="restart()">重启进程…</button>
+    </div>
+    <div class="err" id="cfg-msg"></div>
+  </section>
+
   <div class="err" id="err"></div>
 </main>
 
@@ -98,13 +203,29 @@ function getToken() { return localStorage.getItem(TOKEN_KEY); }
 
 async function api(path, opts = {}) {
   opts.headers = Object.assign({ 'Authorization': 'Bearer ' + getToken() }, opts.headers || {});
+  if (opts.body && !opts.headers['Content-Type']) opts.headers['Content-Type'] = 'application/json';
   const r = await fetch(path, opts);
   if (r.status === 401) { logout(); throw new Error('未授权，请重新登录'); }
   return r;
 }
 
+let msgTimer = null;
+function msg(text, type) {
+  let el = document.getElementById('msg');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'msg';
+    el.className = 'msg';
+    document.body.appendChild(el);
+  }
+  el.className = 'msg ' + (type || 'info');
+  el.textContent = text;
+  clearTimeout(msgTimer);
+  msgTimer = setTimeout(() => { el.textContent = ''; el.className = 'msg'; }, 5000);
+}
+
 function showLogin() { loginEl.style.display = 'flex'; panelEl.style.display = 'none'; }
-function showPanel() { loginEl.style.display = 'none'; panelEl.style.display = 'block'; refresh(); }
+function showPanel() { loginEl.style.display = 'none'; panelEl.style.display = 'block'; refresh(); loadConfig(); }
 
 async function login() {
   const v = document.getElementById('pwd').value.trim();
@@ -123,6 +244,12 @@ async function login() {
 function logout() {
   localStorage.removeItem(TOKEN_KEY);
   showLogin();
+}
+
+function switchTab(name) {
+  document.getElementById('tab-keys').style.display = name === 'keys' ? '' : 'none';
+  document.getElementById('tab-settings').style.display = name === 'settings' ? '' : 'none';
+  if (name === 'settings') loadConfig();
 }
 
 async function refresh() {
@@ -156,7 +283,7 @@ async function refresh() {
         <td>${stateBadge}</td>
         <td>${k.requests}</td>
         <td>${k.failures}</td>
-        <td><span class="locks">${lockTxt || '无'}${errTxt}</span></td>
+        <td class="wrap"><span class="locks">${lockTxt || '无'}${errTxt}</span></td>
         <td>
           <button class="ok" onclick="setState('${k.id}','enabled')">启用</button>
           <button onclick="setState('${k.id}','disabled')">禁用</button>
@@ -171,35 +298,138 @@ async function refresh() {
   }
 }
 
+async function loadConfig() {
+  try {
+    const r = await api('/api/config');
+    if (!r.ok) return;
+    const d = await r.json();
+    document.getElementById('f-listen').value = d.listen || '';
+    document.getElementById('f-upstream').value = d.upstream || '';
+    document.getElementById('f-maxretries').value = d.max_retries;
+    document.getElementById('f-timeout').value = d.request_timeout;
+    document.getElementById('f-blockretry').checked = !!d.block_retry;
+    document.getElementById('f-maxblock').value = d.max_block_retries;
+    document.getElementById('f-blockmode').value = d.block_retry_mode;
+    document.getElementById('f-proxyauth').checked = !!d.proxy_auth;
+    document.getElementById('f-password').value = '';
+  } catch (e) {
+    if (e.message !== '未授权，请重新登录') {
+      document.getElementById('cfg-msg').textContent = '加载配置失败: ' + e;
+    }
+  }
+}
+
+async function saveConfig() {
+  const payload = {
+    listen: document.getElementById('f-listen').value.trim(),
+    upstream: document.getElementById('f-upstream').value.trim(),
+    max_retries: parseInt(document.getElementById('f-maxretries').value, 10),
+    request_timeout: parseInt(document.getElementById('f-timeout').value, 10),
+    block_retry: document.getElementById('f-blockretry').checked,
+    max_block_retries: parseInt(document.getElementById('f-maxblock').value, 10),
+    block_retry_mode: document.getElementById('f-blockmode').value,
+    proxy_auth: document.getElementById('f-proxyauth').checked,
+    admin_password: document.getElementById('f-password').value
+  };
+  if (Number.isNaN(payload.max_retries)) payload.max_retries = 0;
+  if (Number.isNaN(payload.request_timeout)) payload.request_timeout = 30;
+  if (Number.isNaN(payload.max_block_retries)) payload.max_block_retries = 0;
+
+  const btn = document.getElementById('btn-save');
+  btn.disabled = true;
+  try {
+    const r = await api('/api/config', { method: 'PUT', body: JSON.stringify(payload) });
+    const d = await r.json();
+    if (!r.ok) {
+      document.getElementById('cfg-msg').textContent = '保存失败: ' + (d.error || r.status);
+      return;
+    }
+    if (d.password_changed && payload.admin_password) {
+      localStorage.setItem(TOKEN_KEY, payload.admin_password);
+      document.getElementById('f-password').value = '';
+    }
+    const restartTxt = d.restart_required && d.restart_required.length
+      ? '；监听地址需重启后生效' : '';
+    msg('配置已保存，已写入配置文件' + restartTxt, 'ok');
+    document.getElementById('cfg-msg').textContent = '';
+    loadConfig();
+  } catch (e) {
+    document.getElementById('cfg-msg').textContent = '保存失败: ' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function restart() {
+  if (!confirm('确定要重启进程吗？重启期间服务会短暂中断（约 1-3 秒）。')) return;
+  const btn = document.getElementById('btn-restart');
+  btn.disabled = true;
+  try {
+    const r = await api('/api/restart', { method: 'POST' });
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      msg('重启请求失败: ' + (d.error || r.status), 'err');
+      btn.disabled = false;
+      return;
+    }
+    msg('重启指令已提交，服务正在重启…', 'info');
+    waitForServer(btn);
+  } catch (e) {
+    msg('重启请求失败: ' + e.message, 'err');
+    btn.disabled = false;
+  }
+}
+
+function waitForServer(btn) {
+  let tries = 0;
+  const timer = setInterval(async () => {
+    tries++;
+    try {
+      const r = await fetch('/health');
+      if (r.ok) {
+        clearInterval(timer);
+        msg('服务已恢复，正在刷新页面…', 'ok');
+        setTimeout(() => location.reload(), 500);
+      }
+    } catch (e) { /* 服务尚未就绪，继续等待 */ }
+    if (tries >= 30) {
+      clearInterval(timer);
+      msg('服务未在 30 秒内恢复，请手动刷新页面', 'err');
+      btn.disabled = false;
+    }
+  }, 1000);
+}
+
 async function addKey() {
   const input = document.getElementById('newkey');
   const lines = input.value.split('\n').map(s => s.trim()).filter(Boolean);
   if (!lines.length) return;
   try {
-    const r = await api('/api/keys', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ keys: lines }) });
-    if (!r.ok) { document.getElementById('err').textContent = '添加失败'; return; }
+    const r = await api('/api/keys', { method: 'POST', body: JSON.stringify({ keys: lines }) });
     const d = await r.json();
+    if (!r.ok) { msg('添加失败: ' + (d.error || r.status), 'err'); return; }
     input.value = '';
-    document.getElementById('err').textContent =
-      '已添加 ' + d.added + ' 个 Key' + (d.persisted ? '，已写入配置文件' : '（未能写入配置文件，重启后丢失）');
+    msg('已新增 ' + d.added + ' 个 Key' + (d.persisted ? '，已写入配置文件' : '（未能写入配置文件，重启后丢失）'), 'ok');
     refresh();
-  } catch (e) { document.getElementById('err').textContent = e.message; }
+  } catch (e) { msg('添加失败: ' + e.message, 'err'); }
 }
 
 async function delKey(id) {
+  if (!confirm('确定删除该 Key 吗？删除后立即生效并写回配置文件。')) return;
   try {
     const r = await api('/api/keys/' + id, { method: 'DELETE' });
-    if (!r.ok) { document.getElementById('err').textContent = '删除失败'; return; }
+    if (!r.ok) { msg('删除失败', 'err'); return; }
+    msg('已删除', 'ok');
     refresh();
-  } catch (e) { document.getElementById('err').textContent = e.message; }
+  } catch (e) { msg('删除失败: ' + e.message, 'err'); }
 }
 
 async function setState(id, state) {
   try {
-    const r = await api('/api/keys/' + id + '/state', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ state }) });
-    if (!r.ok) { document.getElementById('err').textContent = '操作失败'; return; }
+    const r = await api('/api/keys/' + id + '/state', { method: 'POST', body: JSON.stringify({ state }) });
+    if (!r.ok) { msg('操作失败', 'err'); return; }
     refresh();
-  } catch (e) { document.getElementById('err').textContent = e.message; }
+  } catch (e) { msg('操作失败: ' + e.message, 'err'); }
 }
 
 document.getElementById('pwd').addEventListener('keydown', e => { if (e.key === 'Enter') login(); });

@@ -36,19 +36,27 @@ func main() {
 	}
 
 	pool := NewPool(cfg.Keys)
-	proxy := NewProxy(pool, cfg.Upstream, cfg.MaxRetries, time.Duration(cfg.RequestTimeout)*time.Second)
+	proxy := NewProxy(pool, cfg.Upstream, cfg.maxRetries(), time.Duration(cfg.RequestTimeout)*time.Second)
 	proxy.SetBlockRetry(cfg.blockRetryEnabled(), cfg.MaxBlockRetries, cfg.BlockRetryMode)
 	if cfg.proxyAuthEnabled() {
 		proxy.SetAuthKey(cfg.AdminPassword)
 	} else {
 		slog.Warn("proxy auth disabled: /v1beta is open without a gateway key — never expose this service to a public network")
 	}
-	web := &WebUI{pool: pool, adminPassword: cfg.AdminPassword, configPath: *configPath}
 
-	// protect 为管理 API 套 Bearer Token 认证（密码保证非空，见上方生成逻辑）
-	protect := func(h http.Handler) http.Handler {
-		return bearerAuth(h, cfg.AdminPassword)
+	authGate := NewAuthGate(cfg.AdminPassword)
+	settings := NewSettingsManager(*configPath, cfg, pool, proxy, authGate)
+	web := &WebUI{
+		pool:          pool,
+		adminPassword: cfg.AdminPassword,
+		auth:          authGate,
+		settings:      settings,
+		configPath:    *configPath,
 	}
+
+	// protect 为管理 API 套 Bearer Token 认证（密码保证非空，见上方生成逻辑）。
+	// 使用 AuthGate.Wrap，WebUI 修改 admin_password 后无需重启即可生效。
+	protect := authGate.Wrap
 	slog.Info("webui auth enabled")
 
 	mux := http.NewServeMux()
@@ -60,6 +68,9 @@ func main() {
 	mux.Handle("POST /api/keys", protect(http.HandlerFunc(web.handleAddKey)))
 	mux.Handle("DELETE /api/keys/{id}", protect(http.HandlerFunc(web.handleDeleteKey)))
 	mux.Handle("POST /api/keys/{id}/state", protect(http.HandlerFunc(web.handleSetState)))
+	mux.Handle("GET /api/config", protect(http.HandlerFunc(web.handleConfig)))
+	mux.Handle("PUT /api/config", protect(http.HandlerFunc(web.handleConfig)))
+	mux.Handle("POST /api/restart", protect(http.HandlerFunc(web.handleRestart)))
 	mux.HandleFunc("/", web.handleIndex) // 页面 HTML 公开，数据都在受保护的 API 里
 
 	srv := &http.Server{
@@ -72,7 +83,7 @@ func main() {
 		"listen", cfg.Listen,
 		"upstream", cfg.Upstream,
 		"keys", len(cfg.Keys),
-		"max_retries", cfg.MaxRetries,
+		"max_retries", cfg.maxRetries(),
 		"request_timeout", cfg.RequestTimeout,
 		"block_retry", cfg.blockRetryEnabled(),
 		"max_block_retries", cfg.MaxBlockRetries,

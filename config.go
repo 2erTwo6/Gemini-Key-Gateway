@@ -6,7 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sync"
 )
+
+// configFileMu 串行化所有对 config.json 的读-改-写，避免 WebUI 并发操作
+// （Key 增删、设置保存、密码写回）相互覆盖。
+var configFileMu sync.Mutex
 
 const (
 	defaultListen          = ":8080"
@@ -26,14 +31,14 @@ const (
 type Config struct {
 	Listen          string   `json:"listen"`
 	Upstream        string   `json:"upstream"`
-	MaxRetries      int      `json:"max_retries"`
+	MaxRetries      *int     `json:"max_retries"`       // 一次请求最多重试次数；省略默认 5，显式 0 = 不重试
 	RequestTimeout  int      `json:"request_timeout"`   // 秒；上游未在超时内发出响应头则网关直接回 503
 	BlockRetry      *bool    `json:"block_retry"`       // 安全拦截自动重试；省略字段时默认关闭
 	MaxBlockRetries int      `json:"max_block_retries"` // 安全拦截自动重试次数上限（默认 0 = 关闭）
 	BlockRetryMode  string   `json:"block_retry_mode"`  // full=完整缓冲检测（默认）| stream=只检测流式首块
 	ProxyAuth       *bool    `json:"proxy_auth"`        // 代理转发鉴权；省略字段时默认开启（用 admin_password 作为访问密钥）
 	Keys            []string `json:"keys"`
-	AdminPassword   string   `json:"admin_password"` // WebUI/管理 API 的 Basic Auth 密码，留空则无认证
+	AdminPassword   string   `json:"admin_password"` // WebUI/管理 API 的 Bearer 密码，留空时首次启动自动生成
 }
 
 // blockRetryEnabled 返回安全拦截自动重试开关；省略 block_retry 字段时默认关闭。
@@ -47,6 +52,14 @@ func (c *Config) proxyAuthEnabled() bool {
 	return c.ProxyAuth == nil || *c.ProxyAuth
 }
 
+// maxRetries 返回最大重试次数；省略时取默认值，显式 0 表示不重试。
+func (c *Config) maxRetries() int {
+	if c.MaxRetries == nil {
+		return defaultMaxRetry
+	}
+	return *c.MaxRetries
+}
+
 func (c *Config) applyDefaults() {
 	if c.Listen == "" {
 		c.Listen = defaultListen
@@ -54,8 +67,9 @@ func (c *Config) applyDefaults() {
 	if c.Upstream == "" {
 		c.Upstream = defaultUpstream
 	}
-	if c.MaxRetries <= 0 {
-		c.MaxRetries = defaultMaxRetry
+	if c.MaxRetries == nil {
+		n := defaultMaxRetry
+		c.MaxRetries = &n
 	}
 	if c.RequestTimeout <= 0 {
 		c.RequestTimeout = defaultRequestTimeout
@@ -66,6 +80,24 @@ func (c *Config) applyDefaults() {
 	if c.BlockRetryMode == "" {
 		c.BlockRetryMode = BlockRetryModeFull
 	}
+}
+
+// validate 校验非 Key 配置字段。调用方需先 applyDefaults 归一化默认值。
+func (c *Config) validate() error {
+	if c.MaxRetries != nil && *c.MaxRetries < 0 {
+		return fmt.Errorf("max_retries must be >= 0")
+	}
+	if c.RequestTimeout <= 0 {
+		return fmt.Errorf("request_timeout must be > 0")
+	}
+	if c.MaxBlockRetries < 0 {
+		return fmt.Errorf("max_block_retries must be >= 0")
+	}
+	if c.BlockRetryMode != BlockRetryModeFull && c.BlockRetryMode != BlockRetryModeStream {
+		return fmt.Errorf("block_retry_mode must be %q or %q, got %q",
+			BlockRetryModeFull, BlockRetryModeStream, c.BlockRetryMode)
+	}
+	return nil
 }
 
 func LoadConfig(path string) (*Config, error) {
@@ -86,9 +118,8 @@ func LoadConfig(path string) (*Config, error) {
 		}
 	}
 	cfg.applyDefaults()
-	if cfg.BlockRetryMode != BlockRetryModeFull && cfg.BlockRetryMode != BlockRetryModeStream {
-		return nil, fmt.Errorf("config %s: block_retry_mode must be %q or %q, got %q",
-			path, BlockRetryModeFull, BlockRetryModeStream, cfg.BlockRetryMode)
+	if err := cfg.validate(); err != nil {
+		return nil, fmt.Errorf("config %s: %w", path, err)
 	}
 	return &cfg, nil
 }
@@ -117,7 +148,11 @@ func saveConfigKeys(path string, keys []string) error {
 }
 
 // updateConfig 读取配置文件、调用 mutate 修改字段后原子写回。
+// 所有写回都通过 configFileMu 串行化，避免并发读-改-写互相覆盖。
 func updateConfig(path string, mutate func(map[string]any)) error {
+	configFileMu.Lock()
+	defer configFileMu.Unlock()
+
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return err

@@ -143,7 +143,7 @@ func TestLockExtendOnly(t *testing.T) {
 
 func TestAddRemoveSetState(t *testing.T) {
 	p := NewPool([]string{"k1"})
-	id := p.Add("k2")
+	id, _ := p.Add("k2")
 	if p.Pick("m") == nil || p.Pick("m") == nil {
 		t.Fatal("expected two keys")
 	}
