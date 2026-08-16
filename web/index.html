@@ -54,6 +54,10 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .field .hint { font-size: 12px; color: #8b93a1; margin-top: 5px; line-height: 1.5; }
 .field input[type=checkbox] { width: auto; margin-right: 6px; }
 .checkline { display: flex; align-items: center; gap: 8px; }
+.fieldgroup { grid-column: 1 / -1; background: #11151c; border: 1px solid #2a3340; border-radius: 10px; padding: 14px 16px; }
+.fieldgroup .subgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px 18px; margin-top: 12px; }
+input:disabled, select:disabled { opacity: .45; cursor: not-allowed; }
+.fieldgroup.disabled .subgrid label, .fieldgroup.disabled .subgrid .hint { color: #6b7380; }
 .badge.reqrestart { background: #3a3020; color: #e8b05c; font-size: 11px; padding: 1px 7px; margin-left: 6px; }
 .actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 4px; }
 .err { color: #f07c75; font-size: 13px; margin-top: 8px; }
@@ -149,24 +153,27 @@ td .locks { font-size: 12px; color: #8b93a1; white-space: normal; }
           <input id="f-timeout" name="request_timeout" type="number" min="1" step="1">
           <div class="hint">上游未在超时内发出响应头时，网关直接回 503</div>
         </div>
-        <div class="field">
-          <label>安全拦截重试</label>
+        <div class="fieldgroup" id="blockretry-group">
           <div class="checkline">
             <input id="f-blockretry" name="block_retry" type="checkbox">
-            <span style="font-size:13px">检测到 SAFETY 拦截时追加 user: EOF，然后从 Key 池 Pick 下一个可用 Key 重试</span>
+            <label for="f-blockretry" style="cursor:pointer;font-size:13px">安全拦截重试</label>
           </div>
-        </div>
-        <div class="field">
-          <label>拦截重试次数上限</label>
-          <input id="f-maxblock" name="max_block_retries" type="number" min="0" step="1">
-          <div class="hint">仅在开启「安全拦截重试」后有效；占用 max_retries 重试额度</div>
-        </div>
-        <div class="field">
-          <label>拦截检测模式</label>
-          <select id="f-blockmode" name="block_retry_mode">
-            <option value="full">full — 完整缓冲检测（默认，能发现流中途截断）</option>
-            <option value="stream">stream — 只检测流式首块（保持流式实时性）</option>
-          </select>
+          <div class="hint">检测到 SAFETY 拦截时追加 user: EOF，然后从 Key 池 Pick 下一个可用 Key 重试</div>
+          <div class="subgrid">
+            <div class="field">
+              <label>拦截重试次数上限</label>
+              <input id="f-maxblock" name="max_block_retries" type="number" min="0" step="1">
+              <div class="hint">占用 max_retries 重试额度</div>
+            </div>
+            <div class="field">
+              <label>拦截检测模式</label>
+              <select id="f-blockmode" name="block_retry_mode">
+                <option value="full">full — 完整缓冲检测（默认，能发现流中途截断）</option>
+                <option value="stream">stream — 只检测流式首块（保持流式实时性）</option>
+              </select>
+              <div class="hint">开关关闭时不可选；开启后才能调整</div>
+            </div>
+          </div>
         </div>
         <div class="field">
           <label>代理转发鉴权</label>
@@ -298,6 +305,13 @@ async function refresh() {
   }
 }
 
+function toggleBlockFields() {
+  const on = document.getElementById('f-blockretry').checked;
+  document.getElementById('f-maxblock').disabled = !on;
+  document.getElementById('f-blockmode').disabled = !on;
+  document.getElementById('blockretry-group').classList.toggle('disabled', !on);
+}
+
 async function loadConfig() {
   try {
     const r = await api('/api/config');
@@ -312,6 +326,7 @@ async function loadConfig() {
     document.getElementById('f-blockmode').value = d.block_retry_mode;
     document.getElementById('f-proxyauth').checked = !!d.proxy_auth;
     document.getElementById('f-password').value = '';
+    toggleBlockFields();
   } catch (e) {
     if (e.message !== '未授权，请重新登录') {
       document.getElementById('cfg-msg').textContent = '加载配置失败: ' + e;
@@ -434,6 +449,7 @@ async function setState(id, state) {
 
 document.getElementById('pwd').addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
 document.getElementById('newkey').addEventListener('keydown', e => { if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') addKey(); });
+document.getElementById('f-blockretry').addEventListener('change', toggleBlockFields);
 
 if (getToken()) showPanel(); else showLogin();
 setInterval(() => { if (getToken()) refresh(); }, 5000);
