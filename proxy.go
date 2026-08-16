@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -34,6 +35,7 @@ type Proxy struct {
 	blockRetry      bool
 	maxBlockRetries int
 	blockRetryMode  string
+	authKey         string // 非空时启用代理转发鉴权：客户端必须携带该密钥（通常为 admin_password）
 }
 
 func NewProxy(pool *Pool, upstream string, maxRetries int, requestTimeout time.Duration) *Proxy {
@@ -54,6 +56,13 @@ func NewProxy(pool *Pool, upstream string, maxRetries int, requestTimeout time.D
 		upstream:   u,
 		maxRetries: maxRetries,
 	}
+}
+
+// SetAuthKey 设置代理转发的访问密钥。key 非空时，所有 /v1beta 请求必须先通过
+// requestAuthorized 鉴权（x-goog-api-key 头或 Authorization: Bearer），
+// 否则直接返回 401，不读取请求体、不触碰 Key 池。key 为空表示不启用鉴权。
+func (p *Proxy) SetAuthKey(key string) {
+	p.authKey = key
 }
 
 // SetBlockRetry 配置安全拦截自动重试：检测到 content 端点响应被安全机制拦截
@@ -84,6 +93,14 @@ func (p *Proxy) SetBlockRetry(enabled bool, maxRetries int, modes ...string) {
 // 的 2xx 响应会先整体读入内存以判定是否被安全拦截，未拦截时再逐字节透传（流式首字节因此后移）。
 // mode=stream 时只缓冲流式响应首块做判定，未拦截立即透传，保持流式实时性。
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// 代理转发鉴权：默认开启（authKey 由 main 注入 admin_password）。
+	// 在读取请求体、挑选 Key 之前拦截，未授权请求不触碰任何上游资源。
+	if p.authKey != "" && !requestAuthorized(r, p.authKey) {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="gemini-key-gateway"`)
+		http.Error(w, "unauthorized: invalid gateway key", http.StatusUnauthorized)
+		return
+	}
+
 	model := extractModel(r.URL.Path)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -268,6 +285,28 @@ func isHopByHop(name string) bool {
 		}
 	}
 	return false
+}
+
+// requestAuthorized 校验客户端是否携带正确的网关访问密钥。
+// 兼容 new-api Gemini 渠道的传参方式（x-goog-api-key 头）与通用 Bearer 方式。
+// 注意：客户端自带的 key 在鉴权通过后仍会被 forward 剥离并替换为池中 Key。
+func requestAuthorized(r *http.Request, password string) bool {
+	if v := r.Header.Get("x-goog-api-key"); v != "" {
+		return constantTimeEq(v, password)
+	}
+	const prefix = "Bearer "
+	if v := r.Header.Get("Authorization"); strings.HasPrefix(v, prefix) {
+		return constantTimeEq(strings.TrimSpace(strings.TrimPrefix(v, prefix)), password)
+	}
+	return false
+}
+
+// constantTimeEq 以恒定时间比较两个字符串，降低时序侧信道泄露风险。
+func constantTimeEq(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
 // quotaViolation 是 Google rpc QuotaFailure 的 violation 条目。

@@ -30,6 +30,23 @@ func TestBlockRetryDefaultsOff(t *testing.T) {
 	}
 }
 
+func TestProxyAuthDefaultsOn(t *testing.T) {
+	var cfg Config
+	if !cfg.proxyAuthEnabled() {
+		t.Error("proxy auth should be enabled by default (nil = on)")
+	}
+	cfg.applyDefaults()
+	if !cfg.proxyAuthEnabled() {
+		t.Error("proxy auth should stay enabled after applyDefaults")
+	}
+
+	off := false
+	cfg.ProxyAuth = &off
+	if cfg.proxyAuthEnabled() {
+		t.Error("proxy auth should be disabled when proxy_auth=false")
+	}
+}
+
 func TestLoadConfigInvalidBlockRetryMode(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	if err := os.WriteFile(path, []byte(`{"keys":["k"],"block_retry_mode":"weird"}`), 0o644); err != nil {

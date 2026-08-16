@@ -6,6 +6,7 @@
   "block_retry": false,
   "max_block_retries": 0,
   "block_retry_mode": "full",
+  "proxy_auth": true,
   "admin_password": "change-me",
   "keys": [
     "AIzaSyA...your-first-key...",

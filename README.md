@@ -23,6 +23,7 @@ Gemini API Key 轮询网关：自动切换无效 Key，忠实透传请求/响应
 - **并发安全**：每请求独立 goroutine，Key 池互斥锁保护，锁内零网络 I/O，`-race` 全量测试通过
 - **WebUI 管理面板**：登录后可视化查看各 Key 状态（可用/失效/禁用/锁定与赦免时刻、请求数、失败数、上次错误），支持运行时添加/删除/启用/禁用 Key，无需重启
 - **管理密码**：配置 `admin_password` 即可启用 WebUI 认证；未配置时首次启动自动生成随机密码并打印在日志、写回配置文件
+- **代理转发鉴权**：`/v1beta` 代理默认要求携带网关密钥（默认沿用 `admin_password`），支持 `x-goog-api-key` 头或 `Authorization: Bearer`；new-api 渠道把密钥填在「密钥」栏即可。配置 `"proxy_auth": false` 可关闭（不建议，尤其公网）
 - 单静态二进制，零第三方依赖（`time/tzdata` 内嵌时区数据）
 
 ## 快速开始
@@ -36,7 +37,7 @@ cp config.example.json config.json
 ./gemini-key-gateway -config config.json
 ```
 
-启动日志会打印监听地址与 Key 数量；若未配置 `admin_password`，日志中会给出自动生成的管理密码。
+启动日志会打印监听地址与 Key 数量；若未配置 `admin_password`，日志中会给出自动生成的管理密码。该密码同时用于 WebUI 登录与 `/v1beta` 代理转发鉴权（默认开启）。
 
 ## 配置
 
@@ -46,6 +47,7 @@ cp config.example.json config.json
   "upstream": "https://generativelanguage.googleapis.com",
   "max_retries": 5,
   "request_timeout": 30,
+  "proxy_auth": true,
   "admin_password": "your-password",
   "keys": [
     "AIzaSyA...your-first-key...",
@@ -63,7 +65,8 @@ cp config.example.json config.json
 | `block_retry` | 安全拦截自动重试开关；省略字段时默认关闭，设 `true` 开启 | `false` |
 | `max_block_retries` | 开启 `block_retry` 后，单次请求因安全拦截最多追加「EOF」消息并重试的次数；`<= 0` 表示不重试 | `0` |
 | `block_retry_mode` | 拦截判定模式：`full` = 完整缓冲整个响应（默认，能发现流中途截断，但流式首字节延迟）；`stream` = 只检查流式响应首块（SSE 首事件 / JSON 数组首元素），未拦截立即透传，保持流式实时性，流中途被截断不再重试 | `full` |
-| `admin_password` | WebUI/管理 API 的认证密码；留空则首次启动自动生成 | 自动生成 |
+| `proxy_auth` | 代理转发鉴权开关；省略时默认开启。开启后 `/v1beta` 请求必须携带正确密钥（`x-goog-api-key` 头或 `Authorization: Bearer <admin_password>`），否则返回 401 | `true` |
+| `admin_password` | WebUI/管理 API 的认证密码，同时作为代理转发鉴权的默认密钥；留空则首次启动自动生成 | 自动生成 |
 | `keys` | Gemini API Key 列表（必填） | — |
 
 ## 安全拦截自动重试（防误报）
@@ -133,6 +136,8 @@ docker run -d --name gemini-key-gateway \
 http://gemini-key-gateway:8080
 ```
 
+渠道「密钥」栏填写网关的 `admin_password`（即代理转发鉴权密钥）。new-api 会以 `x-goog-api-key` 请求头把它传给网关，网关校验通过后才会转发并自动替换为池中的 Gemini Key；填错时网关返回 401，渠道测试会失败。
+
 容器间通过虚拟网络互通，宿主机上没有任何监听端口，最安全。
 
 ## 使用
@@ -140,19 +145,22 @@ http://gemini-key-gateway:8080
 客户端将请求指向网关即可，路径与 Gemini 原生 API 完全一致：
 
 ```bash
-# 普通生成（无需自带 key，网关自动注入池中可用 Key）
+# 普通生成（需携带网关密钥 = admin_password；鉴权通过后由网关自动注入池中可用 Key）
 curl -X POST http://127.0.0.1:8080/v1beta/models/gemini-2.0-flash:generateContent \
   -H "Content-Type: application/json" \
+  -H "x-goog-api-key: your-admin-password" \
   -d '{"contents": [{"parts": [{"text": "你好"}]}]}'
 
 # 流式生成（SSE 字节级透传）
 curl -N -X POST "http://127.0.0.1:8080/v1beta/models/gemini-2.0-flash:streamGenerateContent?alt=sse" \
   -H "Content-Type: application/json" \
+  -H "x-goog-api-key: your-admin-password" \
   -d '{"contents": [{"parts": [{"text": "你好"}]}]}'
 ```
 
-- 客户端请求中自带的 `key` 查询参数与 `x-goog-api-key` 头会被剥离，统一替换为池中有效 Key
-- `GET /v1beta/models` 等模型列表接口同样支持
+- 网关密钥校验通过后，客户端请求中自带的 `key` 查询参数与 `x-goog-api-key` 头会被剥离，统一替换为池中有效 Key（鉴权密钥不会泄露给上游）
+- 也可用 `Authorization: Bearer your-admin-password` 代替 `x-goog-api-key` 头
+- `GET /v1beta/models` 等模型列表接口同样支持（同样需要鉴权）
 
 ### WebUI
 

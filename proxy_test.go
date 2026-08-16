@@ -58,9 +58,62 @@ func newBlockRetryStreamProxy(t *testing.T, keys []string, maxBlockRetries int, 
 	return pool, gate
 }
 
+// newTestProxyWithAuth 搭建启用代理转发鉴权的链路。
+func newTestProxyWithAuth(t *testing.T, keys []string, authKey string, upstreamHandler http.HandlerFunc) (*Pool, *httptest.Server) {
+	t.Helper()
+	up := httptest.NewServer(upstreamHandler)
+	t.Cleanup(up.Close)
+	pool := NewPool(keys)
+	proxy := NewProxy(pool, up.URL, 5, 5*time.Second)
+	proxy.SetAuthKey(authKey)
+	gate := httptest.NewServer(proxy)
+	t.Cleanup(gate.Close)
+	return pool, gate
+}
+
 func post(t *testing.T, url, body string) (*http.Response, []byte) {
 	t.Helper()
 	resp, err := http.Post(url, "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	return resp, raw
+}
+
+// postWithKey 发送带指定 x-goog-api-key 头的 POST 请求。
+func postWithKey(t *testing.T, url, body, key string) (*http.Response, []byte) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if key != "" {
+		req.Header.Set("x-goog-api-key", key)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	return resp, raw
+}
+
+// postWithBearer 发送带 Authorization: Bearer 头的 POST 请求。
+func postWithBearer(t *testing.T, url, body, token string) (*http.Response, []byte) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -358,6 +411,82 @@ func TestClientKeyStripped(t *testing.T) {
 		t.Errorf("requests = %d, want 1", snap.Keys[0].Requests)
 	}
 	_ = pool
+}
+
+func TestProxyAuthRequired(t *testing.T) {
+	var hits int
+	_, gate := newTestProxyWithAuth(t, []string{"k1"}, "s3cret", func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Write([]byte("ok"))
+	})
+
+	resp, raw := post(t, gate.URL+"/v1beta/models/gemini-2.0-flash:generateContent", `{}`)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 without credentials", resp.StatusCode)
+	}
+	if hits != 0 {
+		t.Errorf("upstream hits = %d, want 0 (unauthorized must not reach upstream)", hits)
+	}
+	if !strings.Contains(string(raw), "unauthorized") {
+		t.Errorf("body = %q, want unauthorized message", raw)
+	}
+}
+
+func TestProxyAuthWrongKeyRejected(t *testing.T) {
+	var hits int
+	_, gate := newTestProxyWithAuth(t, []string{"k1"}, "s3cret", func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Write([]byte("ok"))
+	})
+
+	resp, _ := postWithKey(t, gate.URL+"/v1beta/models/gemini-2.0-flash:generateContent", `{}`, "wrong")
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 with wrong key", resp.StatusCode)
+	}
+	if hits != 0 {
+		t.Errorf("upstream hits = %d, want 0 (wrong key must not reach upstream)", hits)
+	}
+}
+
+func TestProxyAuthAcceptsXGoogApiKey(t *testing.T) {
+	var receivedKey string
+	pool, gate := newTestProxyWithAuth(t, []string{"realkey"}, "s3cret", func(w http.ResponseWriter, r *http.Request) {
+		receivedKey = keyInQuery(r)
+		w.Write([]byte("ok"))
+	})
+
+	resp, raw := postWithKey(t, gate.URL+"/v1beta/models/gemini-2.0-flash:generateContent", `{}`, "s3cret")
+	if resp.StatusCode != http.StatusOK || string(raw) != "ok" {
+		t.Fatalf("status=%d body=%q, want 200 ok", resp.StatusCode, raw)
+	}
+	// 鉴权密钥必须被剥离，上游收到的是池中 Key 而非客户端密钥
+	if receivedKey != "realkey" {
+		t.Errorf("upstream received key=%q, want pool key realkey", receivedKey)
+	}
+	if snap := pool.Snapshot(); snap.Keys[0].Requests != 1 {
+		t.Errorf("requests = %d, want 1", snap.Keys[0].Requests)
+	}
+}
+
+func TestProxyAuthAcceptsBearer(t *testing.T) {
+	var hits int
+	_, gate := newTestProxyWithAuth(t, []string{"k1"}, "s3cret", func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Write([]byte("ok"))
+	})
+
+	resp, raw := postWithBearer(t, gate.URL+"/v1beta/models/gemini-2.0-flash:generateContent", `{}`, "s3cret")
+	if resp.StatusCode != http.StatusOK || string(raw) != "ok" {
+		t.Fatalf("status=%d body=%q, want 200 ok with Bearer token", resp.StatusCode, raw)
+	}
+	if hits != 1 {
+		t.Errorf("upstream hits = %d, want 1", hits)
+	}
+
+	resp, _ = postWithBearer(t, gate.URL+"/v1beta/models/gemini-2.0-flash:generateContent", `{}`, "wrong")
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("wrong Bearer status = %d, want 401", resp.StatusCode)
+	}
 }
 
 func TestSSEFaithfulStreaming(t *testing.T) {

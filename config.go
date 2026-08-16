@@ -31,6 +31,7 @@ type Config struct {
 	BlockRetry      *bool    `json:"block_retry"`       // 安全拦截自动重试；省略字段时默认关闭
 	MaxBlockRetries int      `json:"max_block_retries"` // 安全拦截自动重试次数上限（默认 0 = 关闭）
 	BlockRetryMode  string   `json:"block_retry_mode"`  // full=完整缓冲检测（默认）| stream=只检测流式首块
+	ProxyAuth       *bool    `json:"proxy_auth"`        // 代理转发鉴权；省略字段时默认开启（用 admin_password 作为访问密钥）
 	Keys            []string `json:"keys"`
 	AdminPassword   string   `json:"admin_password"` // WebUI/管理 API 的 Basic Auth 密码，留空则无认证
 }
@@ -38,6 +39,12 @@ type Config struct {
 // blockRetryEnabled 返回安全拦截自动重试开关；省略 block_retry 字段时默认关闭。
 func (c *Config) blockRetryEnabled() bool {
 	return c.BlockRetry != nil && *c.BlockRetry
+}
+
+// proxyAuthEnabled 返回代理转发鉴权开关；省略 proxy_auth 字段时默认开启，
+// 避免网关在未鉴权状态下被暴露到公网后 API Key 被盗刷。
+func (c *Config) proxyAuthEnabled() bool {
+	return c.ProxyAuth == nil || *c.ProxyAuth
 }
 
 func (c *Config) applyDefaults() {

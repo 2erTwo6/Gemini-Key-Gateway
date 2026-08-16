@@ -38,6 +38,11 @@ func main() {
 	pool := NewPool(cfg.Keys)
 	proxy := NewProxy(pool, cfg.Upstream, cfg.MaxRetries, time.Duration(cfg.RequestTimeout)*time.Second)
 	proxy.SetBlockRetry(cfg.blockRetryEnabled(), cfg.MaxBlockRetries, cfg.BlockRetryMode)
+	if cfg.proxyAuthEnabled() {
+		proxy.SetAuthKey(cfg.AdminPassword)
+	} else {
+		slog.Warn("proxy auth disabled: /v1beta is open without a gateway key — never expose this service to a public network")
+	}
 	web := &WebUI{pool: pool, adminPassword: cfg.AdminPassword, configPath: *configPath}
 
 	// protect 为管理 API 套 Bearer Token 认证（密码保证非空，见上方生成逻辑）
@@ -72,6 +77,7 @@ func main() {
 		"block_retry", cfg.blockRetryEnabled(),
 		"max_block_retries", cfg.MaxBlockRetries,
 		"block_retry_mode", cfg.BlockRetryMode,
+		"proxy_auth", cfg.proxyAuthEnabled(),
 	)
 
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
