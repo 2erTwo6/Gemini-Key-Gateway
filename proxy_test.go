@@ -513,10 +513,13 @@ func TestBlockRetryAppendsContinueAndSucceeds(t *testing.T) {
 	if keys[0] != keys[1] {
 		t.Errorf("block retry should reuse the same key, got %q then %q", keys[0], keys[1])
 	}
-	for _, want := range []string{"System:网络错误", "卡了，继续", `"role":"model"`, `"role":"user"`} {
+	for _, want := range []string{"EOF", `"role":"user"`} {
 		if !strings.Contains(bodies[1], want) {
 			t.Errorf("retried body missing %q: %s", want, bodies[1])
 		}
+	}
+	if strings.Contains(bodies[1], "System:网络错误") || strings.Contains(bodies[1], "卡了，继续") {
+		t.Errorf("retried body should only append a single user message: %s", bodies[1])
 	}
 }
 
@@ -566,7 +569,7 @@ func TestBlockRetryStreaming(t *testing.T) {
 	if !strings.Contains(string(raw), `"text":"hi"`) {
 		t.Errorf("retried SSE body = %q, want candidate text", raw)
 	}
-	if !strings.Contains(lastBody, "卡了，继续") {
+	if !strings.Contains(lastBody, "EOF") {
 		t.Errorf("retried stream request body missing continue message: %s", lastBody)
 	}
 }
@@ -669,7 +672,7 @@ func TestBlockRetryStreamModeSSEInitialBlockRetries(t *testing.T) {
 	if !strings.Contains(string(raw), `"text":"hi"`) {
 		t.Errorf("retried SSE body = %q, want candidate text", raw)
 	}
-	if !strings.Contains(lastBody, "卡了，继续") {
+	if !strings.Contains(lastBody, "EOF") {
 		t.Errorf("retried stream request body missing continue message: %s", lastBody)
 	}
 }
@@ -786,7 +789,7 @@ func TestBlockRetryStreamModeJSONArrayInitialBlockRetries(t *testing.T) {
 	if !strings.Contains(string(raw), "继续吧") {
 		t.Errorf("retried JSON array body = %q, want candidate text", raw)
 	}
-	if !strings.Contains(lastBody, "卡了，继续") {
+	if !strings.Contains(lastBody, "EOF") {
 		t.Errorf("retried stream request body missing continue message: %s", lastBody)
 	}
 }
@@ -892,10 +895,13 @@ func TestAppendContinueMessages(t *testing.T) {
 	if !ok {
 		t.Fatal("appendContinueMessages returned ok=false")
 	}
-	for _, want := range []string{"System:网络错误", "卡了，继续", "你是助手"} {
+	for _, want := range []string{"EOF", "你是助手"} {
 		if !strings.Contains(string(out), want) {
 			t.Errorf("output missing %q: %s", want, out)
 		}
+	}
+	if strings.Contains(string(out), "System:网络错误") || strings.Contains(string(out), "卡了，继续") {
+		t.Errorf("output should only append a single user message: %s", out)
 	}
 	var m map[string]any
 	if err := json.Unmarshal(out, &m); err != nil {
@@ -905,8 +911,8 @@ func TestAppendContinueMessages(t *testing.T) {
 		t.Error("systemInstruction field dropped")
 	}
 	contents, ok := m["contents"].([]any)
-	if !ok || len(contents) != 3 {
-		t.Fatalf("contents = %#v, want 3 entries (original + model + user)", m["contents"])
+	if !ok || len(contents) != 2 {
+		t.Fatalf("contents = %#v, want 2 entries (original + user)", m["contents"])
 	}
 }
 
@@ -927,7 +933,7 @@ func TestAppendContinueMessagesGzip(t *testing.T) {
 	}
 	decoded, _ := io.ReadAll(zr)
 	zr.Close()
-	if !strings.Contains(string(decoded), "卡了，继续") {
+	if !strings.Contains(string(decoded), "EOF") {
 		t.Errorf("gzip roundtrip missing continue message: %s", decoded)
 	}
 }
