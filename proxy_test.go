@@ -130,7 +130,7 @@ func keyInQuery(r *http.Request) string { return r.URL.Query().Get("key") }
 func Test4xxMarkInvalidAndSwitch(t *testing.T) {
 	pool, gate := newTestProxy(t, []string{"k1", "k2"}, func(w http.ResponseWriter, r *http.Request) {
 		if keyInQuery(r) == "k1" {
-			w.WriteHeader(400)
+			w.WriteHeader(401)
 			w.Write([]byte(`{"error":"invalid key"}`))
 			return
 		}
@@ -151,6 +151,37 @@ func Test4xxMarkInvalidAndSwitch(t *testing.T) {
 	}
 	if snap.Keys[0].Failures != 1 || snap.Keys[1].Requests != 1 {
 		t.Errorf("unexpected counters: k1 failures=%d k2 requests=%d", snap.Keys[0].Failures, snap.Keys[1].Requests)
+	}
+}
+
+func Test400PassthroughNoRetryNoInvalid(t *testing.T) {
+	var hits atomic.Int32
+	pool, gate := newTestProxy(t, []string{"k1", "k2"}, func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("X-Upstream", "yes")
+		w.WriteHeader(400)
+		w.Write([]byte(`{"error":{"code":400,"message":"request body invalid"}}`))
+	})
+
+	resp, raw := post(t, gate.URL+"/v1beta/models/gemini-2.0-flash:generateContent", `{bad json`)
+	if resp.StatusCode != 400 {
+		t.Fatalf("status = %d, want 400 (exact passthrough)", resp.StatusCode)
+	}
+	if string(raw) != `{"error":{"code":400,"message":"request body invalid"}}` {
+		t.Errorf("body = %q, want exact upstream 400 body", raw)
+	}
+	if resp.Header.Get("X-Upstream") != "yes" {
+		t.Error("400 upstream headers not passed through")
+	}
+	if n := hits.Load(); n != 1 {
+		t.Errorf("upstream hits = %d, want 1 (400 must NOT retry)", n)
+	}
+	snap := pool.Snapshot()
+	if snap.Keys[0].State != "available" || snap.Keys[1].State != "available" {
+		t.Error("400 must not mark keys invalid")
+	}
+	if snap.Keys[0].Failures != 0 || snap.Keys[1].Failures != 0 {
+		t.Error("400 must not record failures")
 	}
 }
 
@@ -375,15 +406,15 @@ func Test5xxPassThroughNoRetry(t *testing.T) {
 func TestAllRetriesFailPassthroughLast(t *testing.T) {
 	pool, gate := newTestProxy(t, []string{"k1", "k2"}, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Upstream", "yes")
-		w.WriteHeader(400)
-		w.Write([]byte(`{"error":{"code":400,"message":"last error body"}}`))
+		w.WriteHeader(401)
+		w.Write([]byte(`{"error":{"code":401,"message":"last error body"}}`))
 	})
-	// maxRetries=5, 2 keys → 最多 6 次尝试，全部 400
+	// maxRetries=5, 2 keys → 最多 6 次尝试，全部 401
 	resp, raw := post(t, gate.URL+"/v1beta/models/gemini-2.0-flash:generateContent", `{}`)
-	if resp.StatusCode != 400 {
-		t.Fatalf("status = %d, want 400 (last upstream response)", resp.StatusCode)
+	if resp.StatusCode != 401 {
+		t.Fatalf("status = %d, want 401 (last upstream response)", resp.StatusCode)
 	}
-	if string(raw) != `{"error":{"code":400,"message":"last error body"}}` {
+	if string(raw) != `{"error":{"code":401,"message":"last error body"}}` {
 		t.Errorf("body = %q, want exact last upstream body", raw)
 	}
 	if resp.Header.Get("X-Upstream") != "yes" {
@@ -572,10 +603,10 @@ func TestConcurrentRequests(t *testing.T) {
 
 func TestNoUsableKeyReturns503(t *testing.T) {
 	_, gate := newTestProxy(t, []string{"k1"}, func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(400)
+		w.WriteHeader(401)
 		w.Write([]byte("bad"))
 	})
-	// 两个 key 都 400 → 之后无可用 key → 第三次请求应 503
+	// 首次请求 401 → k1 永久失效；之后无可用 key → 后续请求应 503
 	for i := 0; i < 2; i++ {
 		post(t, gate.URL+"/v1beta/models/gemini-2.0-flash:generateContent", `{}`)
 	}

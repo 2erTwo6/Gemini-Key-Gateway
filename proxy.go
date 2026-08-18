@@ -244,6 +244,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		case resp.StatusCode >= 200 && resp.StatusCode < 300:
 			copyResponse(w, resp)
 			return
+		case resp.StatusCode == http.StatusBadRequest:
+			// 400：请求体/请求参数本身有问题，换 Key 无济于事：
+			// 不标记 Key（避免误杀好 Key）、不重试（同一坏请求换 Key 也必 400），
+			// 直接透传，由客户端自行修正请求。
+			slog.Warn("upstream 400, passing through (request problem)", "key", key.id, "model", model)
+			copyResponse(w, resp)
+			return
 		case resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != 429:
 			p.pool.MarkInvalid(key.id, resp.StatusCode)
 			slog.Warn("key marked invalid", "key", key.id, "status", resp.StatusCode, "model", model)
