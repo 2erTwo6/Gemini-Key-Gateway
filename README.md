@@ -98,7 +98,7 @@ user：EOF        ← 网关自动追加（成为新的「最后一条 user 消�
 仓库已配置 GitHub Actions（`.github/workflows/build-image.yml`）：推送 `main`/`beta` 分支、打 `v*` 标签或在 Actions 页面手动触发时，GitHub 会自动运行测试并构建 Docker 镜像，推送到 **GHCR**（GitHub 容器仓库）。
 
 - 镜像地址：`ghcr.io/2ertwo6/gemini-key-gateway`
-- 标签规则：分支推送 → `latest` + 分支名 + `sha-<commit>`；`v1.2.3` 标签 → `1.2.3`、`1.2`、`1` + `latest`
+- 标签规则：`main` 推送 → `latest` + `main` + `sha-<commit>`；`beta` 推送 → `beta` + `sha-<commit>`；`v1.2.3` 标签 → `1.2.3`、`1.2`、`1` + `latest`
 - 多架构：`linux/amd64`（常见服务器）、`linux/arm64`（NAS / 树莓派）
 
 ```bash

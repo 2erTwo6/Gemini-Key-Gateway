@@ -65,6 +65,9 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
             type=sha
+            # metadata-action v5 的 latest=auto 只对 v* 版本标签生效，
+            # 分支推送不会自动打 latest，这里显式给 main 加上
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
           flavor: |
             latest=auto
 
