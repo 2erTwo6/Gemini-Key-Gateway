@@ -19,8 +19,8 @@ func TestBlockRetryDefaultsOff(t *testing.T) {
 	if cfg.MaxBlockRetries != 0 {
 		t.Errorf("MaxBlockRetries default = %d, want 0", cfg.MaxBlockRetries)
 	}
-	if cfg.BlockRetryMode != BlockRetryModeFull {
-		t.Errorf("BlockRetryMode default = %q, want %q", cfg.BlockRetryMode, BlockRetryModeFull)
+	if cfg.BlockRetryMode != BlockRetryModeStream {
+		t.Errorf("BlockRetryMode default = %q, want %q", cfg.BlockRetryMode, BlockRetryModeStream)
 	}
 
 	on := true

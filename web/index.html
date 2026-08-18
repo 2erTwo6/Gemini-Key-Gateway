@@ -168,8 +168,8 @@ td .locks { font-size: 12px; color: #8b93a1; white-space: normal; }
             <div class="field">
               <label>拦截检测模式</label>
               <select id="f-blockmode" name="block_retry_mode">
-                <option value="full">full — 完整缓冲检测（默认，能发现流中途截断）</option>
-                <option value="stream">stream — 只检测流式首块（保持流式实时性）</option>
+                <option value="stream">stream — 只检测流式首块（默认，保持流式实时性）</option>
+                <option value="full">full — 完整缓冲检测（能发现流中途截断）</option>
               </select>
               <div class="hint">开关关闭时不可选；开启后才能调整</div>
             </div>

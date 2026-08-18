@@ -33,13 +33,14 @@ func newTestProxyT(t *testing.T, keys []string, requestTimeout time.Duration, up
 }
 
 // newBlockRetryProxy 搭建启用安全拦截自动重试的链路：gateway(proxy) → mock 上游。
-func newBlockRetryProxy(t *testing.T, keys []string, maxBlockRetries int, upstreamHandler http.HandlerFunc) (*Pool, *httptest.Server) {
+// 可选 modes 显式指定拦截检测模式（省略时使用 SetBlockRetry 的默认模式，即 stream）。
+func newBlockRetryProxy(t *testing.T, keys []string, maxBlockRetries int, upstreamHandler http.HandlerFunc, modes ...string) (*Pool, *httptest.Server) {
 	t.Helper()
 	up := httptest.NewServer(upstreamHandler)
 	t.Cleanup(up.Close)
 	pool := NewPool(keys)
 	proxy := NewProxy(pool, up.URL, 5, 5*time.Second)
-	proxy.SetBlockRetry(true, maxBlockRetries)
+	proxy.SetBlockRetry(true, maxBlockRetries, modes...)
 	gate := httptest.NewServer(proxy)
 	t.Cleanup(gate.Close)
 	return pool, gate
@@ -795,7 +796,7 @@ func TestBlockRetryFullModeRetriedResponseStillBuffered(t *testing.T) {
 		<-release
 		fmt.Fprint(w, "data: [DONE]\n\n")
 		fl.Flush()
-	})
+	}, BlockRetryModeFull) // 断言 full 模式重试后响应仍完整缓冲，须显式指定（默认已是 stream）
 
 	type getResult struct {
 		resp *http.Response

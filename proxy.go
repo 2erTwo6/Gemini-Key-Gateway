@@ -130,15 +130,15 @@ func (p *Proxy) SetRequestTimeout(d time.Duration) {
 // 最多重试 maxRetries 次（默认 1）。这利用上游「只检查最后一条 user 消息」的特性
 // 减少误报，并非真正绕过安全机制。
 //
-// mode 可选 BlockRetryModeFull（默认）或 BlockRetryModeStream：
-//   - full：完整缓冲 2xx 响应判定拦截，能发现流中途的 SAFETY 截断，但流式首字节延迟。
+// mode 可选 BlockRetryModeStream（默认）或 BlockRetryModeFull：
 //   - stream：只检查流式响应首块（SSE 首事件 / JSON 数组首元素），未拦截立即透传，
 //     保持流式实时性；流中途被安全截断不再重试，由客户端自行处理。
+//   - full：完整缓冲 2xx 响应判定拦截，能发现流中途的 SAFETY 截断，但流式首字节延迟。
 func (p *Proxy) SetBlockRetry(enabled bool, maxRetries int, modes ...string) {
 	if maxRetries < 0 {
 		maxRetries = 0
 	}
-	mode := BlockRetryModeFull
+	mode := BlockRetryModeStream
 	if len(modes) > 0 && modes[0] != "" {
 		mode = modes[0]
 	}
@@ -163,9 +163,9 @@ func (p *Proxy) configSnapshot() proxyConfig {
 
 // ServeHTTP 转发到上游：轮询可用 Key、按响应分类重试、安全拦截自动重试、最后透传。
 // 请求体读入内存（重试需重放）；响应流式透传，零缓冲改写。
-// 注意：开启 blockRetry 且 mode=full（默认）时，content 端点（generateContent/streamGenerateContent）
+// 注意：开启 blockRetry 且 mode=full 时，content 端点（generateContent/streamGenerateContent）
 // 的 2xx 响应会先整体读入内存以判定是否被安全拦截，未拦截时再逐字节透传（流式首字节因此后移）。
-// mode=stream 时只缓冲流式响应首块做判定，未拦截立即透传，保持流式实时性。
+// mode=stream（默认）时只缓冲流式响应首块做判定，未拦截立即透传，保持流式实时性。
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 代理转发鉴权：默认开启（authKey 由 main 注入 admin_password）。
 	// 在读取请求体、挑选 Key 之前拦截，未授权请求不触碰任何上游资源。
