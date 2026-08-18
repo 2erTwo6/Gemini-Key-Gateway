@@ -93,6 +93,23 @@ user：EOF        ← 网关自动追加（成为新的「最后一条 user 消�
 
 > <span style="color:red">**端口映射只允许绑定 `127.0.0.1`，禁止 `0.0.0.0`（默认即公网可达）！**</span>
 
+### 方式〇：直接使用 GitHub Actions 自动构建的镜像（免本地编译）
+
+仓库已配置 GitHub Actions（`.github/workflows/build-image.yml`）：推送 `main`/`beta` 分支、打 `v*` 标签或在 Actions 页面手动触发时，GitHub 会自动运行测试并构建 Docker 镜像，推送到 **GHCR**（GitHub 容器仓库）。
+
+- 镜像地址：`ghcr.io/2ertwo6/gemini-key-gateway`
+- 标签规则：分支推送 → `latest` + 分支名 + `sha-<commit>`；`v1.2.3` 标签 → `1.2.3`、`1.2`、`1` + `latest`
+- 多架构：`linux/amd64`（常见服务器）、`linux/arm64`（NAS / 树莓派）
+
+```bash
+docker pull ghcr.io/2ertwo6/gemini-key-gateway:latest
+docker run -d --name gemini-key-gateway -p 127.0.0.1:8080:8080 \
+  -v "$(pwd)/config.json:/app/config.json" \
+  ghcr.io/2ertwo6/gemini-key-gateway:latest
+```
+
+> 首次推送后镜像默认为私有，需到仓库 **Packages** 页（<https://github.com/2erTwo6/Gemini-Key-Gateway/pkgs/container/gemini-key-gateway>）将可见性改为 Public，其他机器才能直接 `docker pull`。
+
 ### 方式一：仅本机访问
 
 ```bash

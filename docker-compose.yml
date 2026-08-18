@@ -1,5 +1,8 @@
 services:
   gateway:
+    # 本地构建镜像（默认）。免本地构建：改用 GitHub Actions 自动构建推送到 GHCR 的镜像时，
+    # 注释掉下面的 build 行，并把 image 改为：
+    #   image: ghcr.io/2ertwo6/gemini-key-gateway:latest
     build: .
     image: gemini-key-gateway:latest
     container_name: gemini-key-gateway

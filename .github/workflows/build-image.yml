@@ -1,0 +1,88 @@
+# GitHub Actions：自动运行测试并构建/推送 Docker 镜像到 GHCR
+#
+# 触发时机：
+#   - push 到 main / beta 分支   → 构建并推送 latest + 分支名 + sha-<commit>
+#   - 打 v* 标签（如 v1.2.3）    → 构建并推送 1.2.3 / 1.2 / 1 + latest
+#   - 手动（Actions 页面 Run workflow）
+#   - pull_request               → 只构建验证，不推送
+#
+# 镜像地址：ghcr.io/2ertwo6/gemini-key-gateway（多架构：amd64 + arm64）
+
+name: Build Docker Image
+
+on:
+  push:
+    branches: [main, beta]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  # GITHUB_REPOSITORY 保留源码大小写（2erTwo6/Gemini-Key-Gateway），
+  # GHCR 要求镜像名全小写，构建步骤里用 bash 参数展开转小写
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 用与 Dockerfile 构建阶段相同的 golang 镜像跑测试，Go 版本只在一处维护
+      - name: Run tests
+        run: docker run --rm -v "$PWD":/src -w /src golang:1.26-alpine go test ./...
+
+      # 交叉编译 arm64 需要 QEMU 模拟
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Lowercase image name for GHCR
+        id: img
+        run: echo "name=${REGISTRY}/${IMAGE_NAME,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.img.outputs.name }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha
+          flavor: |
+            latest=auto
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
