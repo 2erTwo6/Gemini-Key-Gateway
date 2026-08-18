@@ -2,10 +2,10 @@ services:
   gateway:
     # 本地构建镜像（默认）。免本地构建：改用 GitHub Actions 自动构建推送到 GHCR 的镜像时，
     # 注释掉下面的 build 行，并把 image 改为：
-    #   image: ghcr.io/2ertwo6/gemini-key-gateway:latest
+    #   image: ghcr.io/2ertwo6/scorpio-balance:latest
     build: .
-    image: gemini-key-gateway:latest
-    container_name: gemini-key-gateway
+    image: scorpio-balance:latest
+    container_name: scorpio-balance
     # 仅绑定回环地址，只允许本机访问；严禁改为 "8080:8080"（0.0.0.0，公网可达）！
     ports:
       - "127.0.0.1:8080:8080"
@@ -13,7 +13,7 @@ services:
       # Fedora 等启用 SELinux 的系统需加 :Z 后缀，即 ./config.json:/app/config.json:Z
       - ./config.json:/app/config.json
     restart: unless-stopped
-    # 推荐用法：与 new-api 同一虚拟网络，通过容器名 http://gemini-key-gateway:8080 访问，此时无需映射端口
+    # 推荐用法：与 new-api 同一虚拟网络，通过容器名 http://scorpio-balance:8080 访问，此时无需映射端口
     # networks:
     #   - new-api_default
     #   - gateway-local

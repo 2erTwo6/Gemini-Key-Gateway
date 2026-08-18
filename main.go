@@ -79,7 +79,7 @@ func main() {
 		ReadHeaderTimeout: 30 * time.Second,
 	}
 
-	slog.Info("gemini key gateway started",
+	slog.Info("scorpio-balance started",
 		"listen", cfg.Listen,
 		"upstream", cfg.Upstream,
 		"keys", len(cfg.Keys),

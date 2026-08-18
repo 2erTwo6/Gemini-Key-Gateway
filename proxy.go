@@ -173,7 +173,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	authKey := p.authKey
 	p.cfgMu.RUnlock()
 	if authKey != "" && !requestAuthorized(r, authKey) {
-		w.Header().Set("WWW-Authenticate", `Bearer realm="gemini-key-gateway"`)
+		w.Header().Set("WWW-Authenticate", `Bearer realm="scorpio-balance"`)
 		http.Error(w, "unauthorized: invalid gateway key", http.StatusUnauthorized)
 		return
 	}

@@ -6,7 +6,7 @@
 #   - 手动（Actions 页面 Run workflow）
 #   - pull_request               → 只构建验证，不推送
 #
-# 镜像地址：ghcr.io/2ertwo6/gemini-key-gateway（多架构：amd64 + arm64）
+# 镜像地址：ghcr.io/2ertwo6/scorpio-balance（多架构：amd64 + arm64）
 
 name: Build Docker Image
 
@@ -23,7 +23,7 @@ concurrency:
 
 env:
   REGISTRY: ghcr.io
-  # GITHUB_REPOSITORY 保留源码大小写（2erTwo6/Gemini-Key-Gateway），
+  # GITHUB_REPOSITORY 保留源码大小写（2erTwo6/Scorpio-Balance），
   # GHCR 要求镜像名全小写，构建步骤里用 bash 参数展开转小写
   IMAGE_NAME: ${{ github.repository }}
 

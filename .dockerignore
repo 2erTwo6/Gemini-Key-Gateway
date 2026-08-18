@@ -3,7 +3,7 @@ config.json
 *_test.go
 README.md
 # 预编译二进制（10MB），避免打脏构建上下文（CI 检出时本就不存在）
-gemini-key-gateway
+scorpio-balance
 *.log
 *.pid
 .github

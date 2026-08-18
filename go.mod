@@ -1,3 +1,3 @@
-module gemini-key-gateway
+module scorpio-balance
 
 go 1.22

@@ -1,4 +1,4 @@
-# Gemini Key Gateway
+# Scorpio-Balance
 
 Gemini API Key 轮询网关：自动切换无效 Key，忠实透传请求/响应体（含 SSE 流式），WebUI 可视化管理。
 
@@ -34,7 +34,7 @@ cp config.example.json config.json
 # 编辑 config.json 填入你的 API Key
 
 # 2. 启动
-./gemini-key-gateway -config config.json
+./scorpio-balance -config config.json
 ```
 
 启动日志会打印监听地址与 Key 数量；若未配置 `admin_password`，日志中会给出自动生成的管理密码。该密码同时用于 WebUI 登录与 `/v1beta` 代理转发鉴权（默认开启）。
@@ -97,18 +97,18 @@ user：EOF        ← 网关自动追加（成为新的「最后一条 user 消�
 
 仓库已配置 GitHub Actions（`.github/workflows/build-image.yml`）：推送 `main`/`beta` 分支、打 `v*` 标签或在 Actions 页面手动触发时，GitHub 会自动运行测试并构建 Docker 镜像，推送到 **GHCR**（GitHub 容器仓库）。
 
-- 镜像地址：`ghcr.io/2ertwo6/gemini-key-gateway`
+- 镜像地址：`ghcr.io/2ertwo6/scorpio-balance`
 - 标签规则：`main` 推送 → `latest` + `main` + `sha-<commit>`；`beta` 推送 → `beta` + `sha-<commit>`；`v1.2.3` 标签 → `1.2.3`、`1.2`、`1` + `latest`
 - 多架构：`linux/amd64`（常见服务器）、`linux/arm64`（NAS / 树莓派）
 
 ```bash
-docker pull ghcr.io/2ertwo6/gemini-key-gateway:latest
-docker run -d --name gemini-key-gateway -p 127.0.0.1:8080:8080 \
+docker pull ghcr.io/2ertwo6/scorpio-balance:latest
+docker run -d --name scorpio-balance -p 127.0.0.1:8080:8080 \
   -v "$(pwd)/config.json:/app/config.json" \
-  ghcr.io/2ertwo6/gemini-key-gateway:latest
+  ghcr.io/2ertwo6/scorpio-balance:latest
 ```
 
-> 首次推送后镜像默认为私有，需到仓库 **Packages** 页（<https://github.com/2erTwo6/Gemini-Key-Gateway/pkgs/container/gemini-key-gateway>）将可见性改为 Public，其他机器才能直接 `docker pull`。
+> 首次推送后镜像默认为私有，需到仓库 **Packages** 页（<https://github.com/2erTwo6/Scorpio-Balance/pkgs/container/scorpio-balance>）将可见性改为 Public，其他机器才能直接 `docker pull`。
 
 ### 方式一：仅本机访问
 
@@ -126,10 +126,10 @@ docker compose up -d --build
 - 单独使用镜像：
 
 ```bash
-docker build -t gemini-key-gateway .
-docker run -d --name gemini-key-gateway -p 127.0.0.1:8080:8080 \
+docker build -t scorpio-balance .
+docker run -d --name scorpio-balance -p 127.0.0.1:8080:8080 \
   -v "$(pwd)/config.json:/app/config.json" \
-  gemini-key-gateway
+  scorpio-balance
 ```
 
 ### 方式二（推荐）：与 new-api 同一虚拟网络
@@ -140,10 +140,10 @@ docker run -d --name gemini-key-gateway -p 127.0.0.1:8080:8080 \
 # 1. 查看 new-api 所在网络（一般为默认的 new-api 同名网络或自定义网络）
 docker network ls
 # 以网络名 new-api_default 为例，先创建网关容器
-docker run -d --name gemini-key-gateway \
+docker run -d --name scorpio-balance \
   --network new-api_default \
   -v "$(pwd)/config.json:/app/config.json" \
-  gemini-key-gateway
+  scorpio-balance
 ```
 
 若使用 compose，取消 `docker-compose.yml` 中注释的 `networks` 段，并将 `new-api_default` 换成你实际的网络名。
@@ -151,7 +151,7 @@ docker run -d --name gemini-key-gateway \
 随后在 new-api 后台将网关添加为渠道，BaseURL 填写：
 
 ```
-http://gemini-key-gateway:8080
+http://scorpio-balance:8080
 ```
 
 渠道「密钥」栏填写网关的 `admin_password`（即代理转发鉴权密钥）。new-api 会以 `x-goog-api-key` 请求头把它传给网关，网关校验通过后才会转发并自动替换为池中的 Gemini Key；填错时网关返回 401，渠道测试会失败。
@@ -233,7 +233,7 @@ ssh -L 18080:127.0.0.1:8080 user@server-ip -N
 需要 Go 1.22+（`time/tzdata` 要求 Go 1.15+）：
 
 ```bash
-go build -trimpath -ldflags "-s -w" -o gemini-key-gateway .   # 静态二进制
+go build -trimpath -ldflags "-s -w" -o scorpio-balance .   # 静态二进制
 go vet ./...
 go test -race -count=1 ./...                                  # 全量测试（含并发竞态检测）
 ```
